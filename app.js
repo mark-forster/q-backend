@@ -26,7 +26,8 @@ app.use(express.urlencoded({ extended:false })); //To parse data in req.body
 app.use(cookieParser());
 const allowedOrigins = [        // React local dev
   process.env.RENDER_HOST,
-  process.env.DOMAINHOST  // React production URL
+  process.env.DOMAINHOST,  // React production URL
+  process.env.LOCALHOST
 ];
 
 app.use(cors({
