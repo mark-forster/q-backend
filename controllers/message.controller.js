@@ -27,7 +27,7 @@ const startConversation = catchAsync(async (req, res) => {
 
 const sendMessage = catchAsync(async (req, res, next) => {
   const { recipientId, message } = req.body;
-  let  img  = req.file;
+  let img = req.file;
   const senderId = req.user._id;
   const newMessage = await messageService.sendMessage({
     recipientId,
@@ -38,9 +38,7 @@ const sendMessage = catchAsync(async (req, res, next) => {
   res
     .status(201)
     .json({ message: "Message sent successfully", data: newMessage });
- }
- 
-);
+});
 
 const getMessages = catchAsync(async (req, res, next) => {
   const { conversationId } = req.params;
@@ -125,16 +123,6 @@ const deleteMessage = catchAsync(async (req, res, next) => {
     return res
       .status(404)
       .json({ message: "Message not found or unauthorized" });
-  }
-
-  // Socket event  participants
-  if (req.io) {
-    result.participants.forEach((participantId) => {
-      req.io.to(participantId.toString()).emit("messageDeleted", {
-        conversationId: result.conversationId.toString(),
-        messageId: result.deletedMessageId.toString(),
-      });
-    });
   }
 
   res.status(200).json({

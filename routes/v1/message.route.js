@@ -29,7 +29,7 @@ router.put("/group/remove", isAuth, messageController.removeFromGroup);
 
 
 // Message delete route 
-router.delete("/message/:messageId", isAuth, messageController.deleteMessage);
+router.get("/message/:messageId", isAuth, messageController.deleteMessage);
 
 // Conversation delete route
 router.delete(
