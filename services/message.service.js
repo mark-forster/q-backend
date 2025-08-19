@@ -286,6 +286,7 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
         conversationId: conversationId.toString(),
         messageId: deletedMessageId.toString(),
       });
+      console.log("Emit messageDeleted", conversationId, deletedMessageId);
     }
 
     return {
@@ -337,6 +338,112 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
   }
 };
 
+/**
+ * Updates an existing message.
+ * @param {object} params - The parameters for updating a message.
+ * @param {string} params.messageId - The ID of the message to update.
+ * @param {string} params.newText - The new text for the message.
+ * @param {string} params.currentUserId - The ID of the user performing the update.
+ * @returns {Promise<object|null>} The updated message object or null on failure.
+ */
+const updateMessage = async ({ messageId, newText, currentUserId }) => {
+  try {
+    const message = await Message.findById(messageId);
+    if (!message) {
+      throw new Error("Message not found.");
+    }
+    // Authorization check: ensure the current user is the sender of the message.
+    if (message.sender.toString() !== currentUserId.toString()) {
+      throw new Error("You are not authorized to update this message.");
+    }
+    // Update the message text.
+    message.text = newText;
+    await message.save();
+    // Update the conversation's last message if this was the last message.
+    const conversation = await Conversation.findById(message.conversationId);
+    if (conversation && conversation.lastMessage.text === message.text) {
+      conversation.lastMessage.text = newText;
+      await conversation.save();
+    }
+    // Emit a socket event to inform all participants about the update.
+    io.to(message.conversationId.toString()).emit("messageUpdated", {
+      conversationId: message.conversationId.toString(),
+      messageId: message._id.toString(),
+      newText,
+    });
+    console.log(" Emit messageUpdated", messageId, newText);
+    return message;
+  } catch (error) {
+    console.error("Update Message Error:", error);
+    return null;
+  }
+};
+
+/**
+ * @param {object} params
+ *  * @param {string} params.messageId - The ID of the message to update.
+ * @param {string} params.currentUserId - The new text for the message.
+ * @param {string} params.participantIds - The ID of the user performing the update.
+ *
+ *
+ */
+const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
+  try {
+    const originalMessage = await Message.findById(messageId);
+    // console.log(originalMessage);
+    if (!originalMessage) {
+      return res.status(404).json({ error: "Original message not found" });
+    }
+    // forward message array
+    const forwardedMessages = [];
+
+    // create Message for each recipient(recive users)
+    for (const recipientId of recipientIds) {
+      // check conversation already exists
+      let conversation = await Conversation.findOne({
+        participants: { $all: [currentUserId, recipientId] },
+      });
+
+      // conversation create if not already exist
+      if (!conversation) {
+        conversation = new Conversation({
+          participants: [currentUserId, recipientId],
+        });
+        await conversation.save();
+      }
+
+      // create new Message
+      const newMessage = new Message({
+        sender: currentUserId,
+        receiver: recipientId,
+        conversationId: conversation._id,
+        text: originalMessage.text,
+        img: originalMessage.img
+          ? {
+              public_id: originalMessage.img.public_id || null,
+              url: originalMessage.img.url || null,
+            }
+          : null,
+      });
+
+      await newMessage.save();
+
+      // Conversation lastMessage message  update
+      conversation.lastMessage = {
+        text: originalMessage.text,
+        sender: originalMessage.sender,
+      };
+      await conversation.save();
+
+      forwardedMessages.push(newMessage);
+    }
+    return forwardedMessages;
+  } catch (error) {
+    console.error("Error forwarding message:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
 module.exports = {
   sendMessage,
   findConversation,
@@ -348,4 +455,6 @@ module.exports = {
   removeFromGroup,
   deleteMessage,
   deleteConversation,
+  updateMessage,
+  forwardMessage,
 };

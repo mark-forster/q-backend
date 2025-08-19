@@ -161,6 +161,34 @@ const deleteConversation = catchAsync(async (req, res, next) => {
   });
 });
 
+// update Method
+const updateMessage=catchAsync(async(req,res)=>{
+  const { messageId } = req.params;
+  const {newText}=req.body;
+  const currentUserId = req.user._id;
+  const result=await messageService.updateMessage({ messageId, newText, currentUserId });
+  if(!result){
+    return res.status(405).json({message:"Message not found or unauthorized"});
+  }
+  res.status(200).json({message:"Message Updated Successfully",data:{messageId: result.messageId}});
+
+})
+
+
+//forward Message Method
+const forwardMessage=catchAsync(async(req,res)=>{
+        const {messageId}= req.params;
+        const {recipientIds}=req.body;
+        const currentUserId=req.user._id;
+        const result = await messageService.forwardMessage({currentUserId,messageId,recipientIds});
+        if(!result){
+          console.log(result);
+          return res.status(405).json({message:"Something went wrong this may be serverError"});
+
+        }
+        res.status(201).json({message:"Message Forwarded successfully"});
+})
+
 module.exports = {
   startConversation,
   sendMessage,
@@ -172,4 +200,6 @@ module.exports = {
   removeFromGroup,
   deleteMessage,
   deleteConversation,
+  updateMessage,
+  forwardMessage
 };

@@ -26,10 +26,10 @@ router.post("/group/create", isAuth, messageController.createGroupChat);
 router.put("/group/rename", isAuth, messageController.renameGroup);
 router.put("/group/add", isAuth, messageController.addToGroup);
 router.put("/group/remove", isAuth, messageController.removeFromGroup);
-
-
+//
+router.put("/update/:messageId", isAuth, messageController.updateMessage);
 // Message delete route 
-router.get("/message/:messageId", isAuth, messageController.deleteMessage);
+router.delete("/message/:messageId", isAuth, messageController.deleteMessage);
 
 // Conversation delete route
 router.delete(
@@ -38,6 +38,7 @@ router.delete(
   messageController.deleteConversation
 );
 
-
+// Forward Message Route
+router.post("/message/forward/:messageId", isAuth,messageController.forwardMessage)
 
 module.exports = router;
