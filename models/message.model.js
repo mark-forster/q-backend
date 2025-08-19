@@ -65,7 +65,7 @@ const messageSchema = new mongoose.Schema(
       }
     },
     attachments: {
-      type: [attachmentSchema], // multiple files allowed
+      type: [attachmentSchema], // multiple files al
       default: [],
     },
     seenBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],

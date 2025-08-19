@@ -39,6 +39,6 @@ router.delete(
 );
 
 // Forward Message Route
-router.post("/message/forward/:messageId", isAuth,messageController.forwardMessage)
+router.post("/message/forward/:messageId", isAuth, messageController.forwardMessage)
 
 module.exports = router;
