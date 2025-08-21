@@ -6,7 +6,7 @@ const upload=require('../../util/multer')
 //goto message page
 router.post("/conversations/start", isAuth, messageController.startConversation);
 // Send message (to group or one-to-one)
-router.post("/", isAuth, upload.single('image'), messageController.sendMessage);
+router.post("/", isAuth, upload.array('files'), messageController.sendMessage);
 
 // Get messages from a conversation (group or one-to-one)
 router.get(

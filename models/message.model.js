@@ -54,16 +54,6 @@ const messageSchema = new mongoose.Schema(
       required: true,
     },
     text: String,
-    img: {
-      public_id: {
-        type: String,
-        default: null,
-      },
-      url: {
-        type: String,
-        default: null,
-      }
-    },
     attachments: {
       type: [attachmentSchema], // multiple files al
       default: [],

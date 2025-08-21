@@ -27,13 +27,13 @@ const startConversation = catchAsync(async (req, res) => {
 
 const sendMessage = catchAsync(async (req, res, next) => {
   const { recipientId, message } = req.body;
-  let img = req.file;
+  const files = req.files;
   const senderId = req.user._id;
   const newMessage = await messageService.sendMessage({
     recipientId,
     message,
     senderId,
-    img,
+    files
   });
   res
     .status(201)

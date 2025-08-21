@@ -63,13 +63,18 @@ const sendMessage = async ({
   conversationId,
   message,
   senderId,
-  img,
+  files,
 }) => {
   try {
     let conversation;
-    let imageInfo = null;
+    let attachments = [];
 
-    if (conversationId && conversationId.startsWith("mock-")) {
+    // Corrected check to ensure conversationId is a string before using .startsWith()
+    // This prevents the "Cannot read properties of undefined" error.
+        const isMock = String(conversationId || "").startsWith("mock-");
+    if (
+      isMock
+    ) {
       conversation = await Conversation.findOne({
         participants: { $all: [senderId, recipientId] },
       });
@@ -92,29 +97,60 @@ const sendMessage = async ({
           participants: [senderId, recipientId],
         });
       }
-    } // Upload image if provided
+    } // Upload image if provided //Upload files and create attchment objects
+    if (files && files.length > 0) {
+      const uploadPromises = files.map(async (file) => {
+          let attachmentType;
+        const mimeType = file.mimetype;
+        const uploadedResponse = await cloudinary.uploader.upload(file.path, {
+          resource_type: "auto",
+        });
+        fs.unlinkSync(file.path); // Delete the local file after upload
+      
+        if (mimeType.startsWith("image/")) {
+          attachmentType = "image";
+        } else if (mimeType.startsWith("video/")) {
+          attachmentType = "video";
+        } else if (mimeType.startsWith("audio/")) {
+          attachmentType = "audio";
+        } else if (mimeType.includes("gif")) {
+          attachmentType = "gif";
+        } else {
+          attachmentType = "file";
+        }
 
-    if (img) {
-      const uploadedResponse = await cloudinary.uploader.upload(img.path, {
-        resource_type: "auto",
+        return {
+          type: attachmentType,
+          url: uploadedResponse.secure_url,
+          public_id: uploadedResponse.public_id,
+          name: file.originalname,
+          size: file.size,
+          width: uploadedResponse.width || null,
+          height: uploadedResponse.height || null,
+          duration: uploadedResponse.duration || null,
+        };
       });
-      fs.unlinkSync(img.path); // Delete the local file after upload
-      imageInfo = {
-        public_id: uploadedResponse.public_id,
-        url: uploadedResponse.secure_url,
-      };
+      attachments = await Promise.all(uploadPromises);
     } // Create new message
 
     const newMessage = await Message.create({
       conversationId: conversation._id,
       sender: senderId,
       text: message || "",
-      img: imageInfo || null,
+      attachments: attachments || null,
       seenBy: [senderId],
     }); // Update conversation's last message
-
+    let lastText = "";
+if (attachments && attachments.length > 0) {
+  // final attachment
+  const lastAttachment = attachments[attachments.length - 1];
+  lastText = lastAttachment.url;
+} else {
+  // if not attachment add  text 
+  lastText = message || "";
+}
     conversation.lastMessage = {
-      text: message || (imageInfo ? imageInfo.url : ""),
+      text: lastText,
       sender: senderId,
       seenBy: [senderId],
     };
@@ -124,8 +160,20 @@ const sendMessage = async ({
 
     return newMessage;
   } catch (err) {
-    console.error("Send Message Error:", err.message || err);
-    if (img) fs.unlink(img.path, () => {});
+    console.error("Send Message Error:", err.message || err); // ** Unlink  multiple files in case of an error ** // Make sure to clean up any files that were partially processed.
+
+    if (files && files.length > 0) {
+      files.forEach((file) => {
+        try {
+          // Check if the file still exists before trying to unlink
+          if (fs.existsSync(file.path)) {
+            fs.unlinkSync(file.path);
+          }
+        } catch (unlinkErr) {
+          console.error("Failed to unlink temporary file:", unlinkErr);
+        }
+      });
+    }
     return null;
   }
 };
