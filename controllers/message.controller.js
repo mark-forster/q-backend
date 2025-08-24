@@ -5,6 +5,7 @@ const Conversation = require("../models/conversation.model");
 const cloudinary = require("cloudinary").v2;
 const messageService = require("../services/message.service");
 const fs = require("fs");
+
 const startConversation = catchAsync(async (req, res) => {
   const userId = req.user._id;
   const { otherUserId } = req.body;
@@ -33,7 +34,7 @@ const sendMessage = catchAsync(async (req, res, next) => {
     recipientId,
     message,
     senderId,
-    files
+    files,
   });
   res
     .status(201)
@@ -146,7 +147,7 @@ const deleteConversation = catchAsync(async (req, res, next) => {
       .json({ message: "Conversation not found or unauthorized" });
   }
 
-  // Socket event  participants
+  // Socket event participants
   if (req.io) {
     result.participants.forEach((participantId) => {
       req.io.to(participantId.toString()).emit("conversationDeleted", {
@@ -162,32 +163,106 @@ const deleteConversation = catchAsync(async (req, res, next) => {
 });
 
 // update Method
-const updateMessage=catchAsync(async(req,res)=>{
+const updateMessage = catchAsync(async (req, res) => {
   const { messageId } = req.params;
-  const {newText}=req.body;
+  const { newText } = req.body;
   const currentUserId = req.user._id;
-  const result=await messageService.updateMessage({ messageId, newText, currentUserId });
-  if(!result){
-    return res.status(405).json({message:"Message not found or unauthorized"});
+  const result = await messageService.updateMessage({
+    messageId,
+    newText,
+    currentUserId,
+  });
+  if (!result) {
+    return res
+      .status(405)
+      .json({ message: "Message not found or unauthorized" });
   }
-  res.status(200).json({message:"Message Updated Successfully",data:{messageId: result.messageId}});
-
-})
-
+  res.status(200).json({
+    message: "Message Updated Successfully",
+    data: { messageId: result.messageId },
+  });
+});
 
 //forward Message Method
-const forwardMessage=catchAsync(async(req,res)=>{
-        const {messageId}= req.params;
-        const {recipientIds}=req.body;
-        const currentUserId=req.user._id;
-        const result = await messageService.forwardMessage({currentUserId,messageId,recipientIds});
-        if(!result){
-          console.log(result);
-          return res.status(405).json({message:"Something went wrong this may be serverError"});
+const forwardMessage = catchAsync(async (req, res) => {
+  const { messageId } = req.params;
+  const { recipientIds } = req.body;
+  const currentUserId = req.user._id;
+  const result = await messageService.forwardMessage({
+    currentUserId,
+    messageId,
+    recipientIds,
+  });
+  if (!result) {
+    console.log(result);
+    return res
+      .status(405)
+      .json({ message: "Something went wrong this may be serverError" });
+  }
+  res.status(201).json({ message: "Message Forwarded successfully" });
+});
 
-        }
-        res.status(201).json({message:"Message Forwarded successfully"});
-})
+// controller
+const getSignedUrl = catchAsync(async (req, res) => {
+  const { publicId } = req.params;
+  if (!publicId) return res.status(400).json({ error: "Public ID is required" });
+
+  const resourceType = req.query.resourceType || "video";
+  const format = req.query.format;
+  const forceMp3 = String(req.query.forceMp3 || "").toLowerCase() === "true";
+
+  // 15 minute expiry
+  const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
+
+  if (resourceType === "video") {
+    const opts = {
+      resource_type: "video", // Cloudinary handles audio under 'video'
+      type: "authenticated",
+      secure: true,
+      sign_url: true,
+      expires_at: expiresAt,
+    };
+
+    // audio: optionally transcode to mp3 for widest support
+    if (forceMp3) {
+      opts.format = "mp3";
+      opts.transformation = [{ audio_codec: "mp3" }];
+    } else if (format) {
+      opts.format = format; // serve requested/original format
+    }
+
+    const url = cloudinary.url(publicId, opts);
+    return res.json({ url });
+  }
+
+  if (resourceType === "raw") {
+    const url = cloudinary.utils.private_download_url(publicId, format || "bin", {
+      resource_type: "raw",
+      type: "authenticated",
+      secure: true,
+      sign_url: true,
+      expires_at: expiresAt,
+      // don't set attachment:true so browsers can try inline view
+    });
+    return res.json({ url });
+  }
+
+  if (resourceType === "image") {
+    const url = cloudinary.url(publicId, {
+      resource_type: "image",
+      type: "authenticated",
+      secure: true,
+      sign_url: true,
+      expires_at: expiresAt,
+      format: format || undefined,
+    });
+    return res.json({ url });
+  }
+
+  const url = cloudinary.url(publicId, { resource_type: "image", secure: true });
+  return res.json({ url });
+});
+
 
 module.exports = {
   startConversation,
@@ -201,5 +276,6 @@ module.exports = {
   deleteMessage,
   deleteConversation,
   updateMessage,
-  forwardMessage
+  forwardMessage,
+  getSignedUrl,
 };

@@ -11,23 +11,23 @@ const attachmentSchema = new mongoose.Schema(
     },
     url: {
       type: String,
-      required: true, // CDN/Object storage URL
+      required: false, // Updated: changed to false for authenticated files
     },
     public_id: {
       type: String,
-      default: null, // Cloudinary/S3 key
+      default: null,
     },
     name: {
       type: String,
-      default: null, // original file name
+      default: null,
     },
     size: {
       type: Number,
-      default: null, // bytes
+      default: null,
     },
     width: {
       type: Number,
-      default: null, // for images/videos
+      default: null,
     },
     height: {
       type: Number,
@@ -35,8 +35,18 @@ const attachmentSchema = new mongoose.Schema(
     },
     duration: {
       type: Number,
-      default: null, // for audio/video (sec)
+      default: null,
     },
+     format:{
+      type:String,
+      default:null
+     },
+     resource_type: {
+    type: String,
+    enum: ["image", "video", "raw", null],
+    default: null,                                  // Cloudinary resource_type
+  },
+  mimeType: { type: String, default: null },
   },
   { _id: false }
 );
@@ -55,7 +65,7 @@ const messageSchema = new mongoose.Schema(
     },
     text: String,
     attachments: {
-      type: [attachmentSchema], // multiple files al
+      type: [attachmentSchema],
       default: [],
     },
     seenBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],

@@ -49,135 +49,133 @@ const findConversation = async (userId, otherUserId) => {
 };
 
 /**
- * Sends a new message in a conversation.
- * @param {object} params - The message parameters.
- * @param {string} params.recipientId - The ID of the message recipient (used for direct messages).
+ * Sends a message and handles file uploads to Cloudinary.
+ *
+ * @param {object} params - The parameters for the function.
+ * @param {string} params.recipientId - The ID of the recipient.
  * @param {string} params.conversationId - The ID of the conversation.
- * @param {string} params.message - The message text.
- * @param {string} params.senderId - The ID of the message sender.
- * @param {object} params.img - The uploaded image file object.
- * @returns {Promise<object|null>} The newly created message object or null on failure.
+ * @param {string} params.message - The text of the message.
+ * @param {string} params.senderId - The ID of the sender.
+ * @param {array} params.files - An array of file objects to be uploaded.
+ * @returns {Promise<object|null>} The new message object or null if an error occurred.
  */
-const sendMessage = async ({
-  recipientId,
-  conversationId,
-  message,
-  senderId,
-  files,
-}) => {
+const sendMessage =  async ({ recipientId, conversationId, message, senderId, files }) => {
   try {
+    // locate or create conversation
     let conversation;
-    let attachments = [];
+    const isMock = String(conversationId || "").startsWith("mock-");
 
-    // Corrected check to ensure conversationId is a string before using .startsWith()
-    // This prevents the "Cannot read properties of undefined" error.
-        const isMock = String(conversationId || "").startsWith("mock-");
-    if (
-      isMock
-    ) {
-      conversation = await Conversation.findOne({
-        participants: { $all: [senderId, recipientId] },
-      });
+    if (isMock) {
+      conversation = await Conversation.findOne({ participants: { $all: [senderId, recipientId] } });
       if (!conversation) {
-        conversation = await Conversation.create({
-          isGroup: false,
-          participants: [senderId, recipientId],
-        });
+        conversation = await Conversation.create({ isGroup: false, participants: [senderId, recipientId] });
       }
     } else if (conversationId) {
       conversation = await Conversation.findById(conversationId);
       if (!conversation) throw new Error("Conversation not found");
     } else {
-      conversation = await Conversation.findOne({
-        participants: { $all: [senderId, recipientId] },
-      });
+      conversation = await Conversation.findOne({ participants: { $all: [senderId, recipientId] } });
       if (!conversation) {
-        conversation = await Conversation.create({
-          isGroup: false,
-          participants: [senderId, recipientId],
-        });
+        conversation = await Conversation.create({ isGroup: false, participants: [senderId, recipientId] });
       }
-    } // Upload image if provided //Upload files and create attchment objects
+    }
+
+    // uploads
+    let attachments = [];
     if (files && files.length > 0) {
       const uploadPromises = files.map(async (file) => {
-          let attachmentType;
-        const mimeType = file.mimetype;
-        const uploadedResponse = await cloudinary.uploader.upload(file.path, {
-          resource_type: "auto",
-        });
-        fs.unlinkSync(file.path); // Delete the local file after upload
-      
+        const mimeType = file.mimetype || "";
+        const uploadOptions = { secure: true, type: "upload", resource_type: "auto" };
+        let attachmentType;
+
         if (mimeType.startsWith("image/")) {
-          attachmentType = "image";
+          attachmentType = mimeType === "image/gif" ? "gif" : "image";
+          uploadOptions.resource_type = "image";
+          uploadOptions.type = "upload"; // public ok for images
         } else if (mimeType.startsWith("video/")) {
           attachmentType = "video";
+          uploadOptions.resource_type = "video";
+          uploadOptions.type = "authenticated";
         } else if (mimeType.startsWith("audio/")) {
+          // IMPORTANT: audio stored under resource_type 'video'
           attachmentType = "audio";
-        } else if (mimeType.includes("gif")) {
-          attachmentType = "gif";
+          uploadOptions.resource_type = "video";
+          uploadOptions.type = "authenticated";
+          // optional eager mp3 for broad support:
+          // uploadOptions.eager = [{ format: "mp3", audio_codec: "mp3" }];
+          // uploadOptions.eager_async = true;
+        } else if (mimeType.startsWith("application/")) {
+          attachmentType = "file";
+          uploadOptions.resource_type = "raw";
+          uploadOptions.type = "authenticated";
         } else {
           attachmentType = "file";
+          uploadOptions.resource_type = "raw";
+          uploadOptions.type = "authenticated";
         }
 
+        const uploaded = await cloudinary.uploader.upload(file.path, uploadOptions);
+        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+
+        // public URL for public images only; others will use signed URL on demand
+        const isPublicImage = (attachmentType === "image" || attachmentType === "gif") && uploadOptions.type !== "authenticated";
+
         return {
-          type: attachmentType,
-          url: uploadedResponse.secure_url,
-          public_id: uploadedResponse.public_id,
-          name: file.originalname,
-          size: file.size,
-          width: uploadedResponse.width || null,
-          height: uploadedResponse.height || null,
-          duration: uploadedResponse.duration || null,
+          type: attachmentType, // image | gif | video | audio | file
+          url: isPublicImage ? uploaded.secure_url : null,
+          public_id: uploaded.public_id,
+          name: file.originalname || null,
+          size: file.size || null,
+          width: uploaded.width || null,
+          height: uploaded.height || null,
+          duration: uploaded.duration || null,
+          format: uploaded.format || null,            // webm/ogg/wav/mp3/png/mp4...
+          resource_type: uploaded.resource_type || null, // 'image' | 'video' | 'raw'
+          mimeType,                                       // 'audio/webm' etc.
         };
       });
-      attachments = await Promise.all(uploadPromises);
-    } // Create new message
 
+      attachments = await Promise.all(uploadPromises);
+    }
+
+    // create message
     const newMessage = await Message.create({
       conversationId: conversation._id,
       sender: senderId,
       text: message || "",
-      attachments: attachments || null,
+      attachments,
       seenBy: [senderId],
-    }); // Update conversation's last message
-    let lastText = "";
-if (attachments && attachments.length > 0) {
-  // final attachment
-  const lastAttachment = attachments[attachments.length - 1];
-  lastText = lastAttachment.url;
-} else {
-  // if not attachment add  text 
-  lastText = message || "";
-}
-    conversation.lastMessage = {
-      text: lastText,
-      sender: senderId,
-      seenBy: [senderId],
-    };
-    await conversation.save(); // Emit socket event to all participants in the conversation room
+    });
 
-    io.to(conversation._id.toString()).emit("newMessage", newMessage);
+    // lastMessage preview
+    let lastText = message || "";
+    if (!lastText && attachments.length > 0) {
+      const t = attachments[attachments.length - 1].type;
+      lastText =
+        t === "image" ? "Image" :
+        t === "gif"   ? "GIF"   :
+        t === "video" ? "Video" :
+        t === "audio" ? "Audio" :
+        `File: ${attachments[attachments.length - 1].name || "Attachment"}`;
+    }
 
+    conversation.lastMessage = { text: lastText, sender: senderId, seenBy: [senderId] };
+    await conversation.save();
+
+    // realtime
+    io && io.to(conversation._id.toString()).emit("newMessage", newMessage);
     return newMessage;
   } catch (err) {
-    console.error("Send Message Error:", err.message || err); // ** Unlink  multiple files in case of an error ** // Make sure to clean up any files that were partially processed.
-
+    console.error("Send Message Error:", err);
+    // cleanup temps
     if (files && files.length > 0) {
-      files.forEach((file) => {
-        try {
-          // Check if the file still exists before trying to unlink
-          if (fs.existsSync(file.path)) {
-            fs.unlinkSync(file.path);
-          }
-        } catch (unlinkErr) {
-          console.error("Failed to unlink temporary file:", unlinkErr);
-        }
-      });
+      for (const f of files) {
+        try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {}
+      }
     }
-    return null;
+    throw err;
   }
 };
-
 /**
  * Retrieves all messages for a given conversation.
  * @param {object} params - The parameters for getting messages.

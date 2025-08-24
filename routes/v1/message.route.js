@@ -7,6 +7,11 @@ const upload=require('../../util/multer')
 router.post("/conversations/start", isAuth, messageController.startConversation);
 // Send message (to group or one-to-one)
 router.post("/", isAuth, upload.array('files'), messageController.sendMessage);
+//Cloudinary download url check auth
+router.get("/get-signed-url/:publicId", isAuth,messageController.getSignedUrl);
+
+
+
 
 // Get messages from a conversation (group or one-to-one)
 router.get(
