@@ -10,9 +10,6 @@ router.post("/", isAuth, upload.array('files'), messageController.sendMessage);
 //Cloudinary download url check auth
 router.get("/get-signed-url/:publicId", isAuth,messageController.getSignedUrl);
 
-
-
-
 // Get messages from a conversation (group or one-to-one)
 router.get(
   "/conversation/:conversationId",
@@ -35,7 +32,7 @@ router.put("/group/remove", isAuth, messageController.removeFromGroup);
 router.put("/update/:messageId", isAuth, messageController.updateMessage);
 // Message delete route 
 router.delete("/message/:messageId", isAuth, messageController.deleteMessage);
-
+router.delete("/message/for-me/:messageId", isAuth, messageController.deleteMessageForMe);
 // Conversation delete route
 router.delete(
   "/conversation/:conversationId",

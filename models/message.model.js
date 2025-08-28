@@ -11,7 +11,7 @@ const attachmentSchema = new mongoose.Schema(
     },
     url: {
       type: String,
-      required: false, // Updated: changed to false for authenticated files
+      required: false, // Authenticated files  
     },
     public_id: {
       type: String,
@@ -37,16 +37,21 @@ const attachmentSchema = new mongoose.Schema(
       type: Number,
       default: null,
     },
-     format:{
-      type:String,
-      default:null
-     },
-     resource_type: {
-    type: String,
-    enum: ["image", "video", "raw", null],
-    default: null,                                  // Cloudinary resource_type
-  },
-  mimeType: { type: String, default: null },
+    format: {
+      type: String,
+      default: null,
+    },
+    resource_type: {
+      type: String,
+      enum: ["image", "video", "raw", null],
+      default: null, // Cloudinary resource_type
+    },
+    cloudinary_type: {
+      type: String,
+      enum: ["upload", "authenticated", null],
+      default: null, // Cloudinary type (upload | authenticated)
+    },
+    mimeType: { type: String, default: null },
   },
   { _id: false }
 );
@@ -68,7 +73,17 @@ const messageSchema = new mongoose.Schema(
       type: [attachmentSchema],
       default: [],
     },
+    deletedBy: [
+        {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+        }
+    ],
     seenBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    isForwarded: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );

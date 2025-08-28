@@ -41,9 +41,11 @@ const sendMessage = catchAsync(async (req, res, next) => {
     .json({ message: "Message sent successfully", data: newMessage });
 });
 
+// 💡 UPDATED: getMessages controller
 const getMessages = catchAsync(async (req, res, next) => {
   const { conversationId } = req.params;
-  const result = await messageService.getMessages({ conversationId });
+  const userId = req.user._id; // 💡 NEW: Get the current user's ID
+  const result = await messageService.getMessages({ conversationId, userId }); // 💡 UPDATED: Pass userId to the service
   res.send(result);
 });
 
@@ -113,11 +115,13 @@ const removeFromGroup = catchAsync(async (req, res, next) => {
 
 const deleteMessage = catchAsync(async (req, res, next) => {
   const { messageId } = req.params;
+  const { deleteForEveryone } = req.query;
   const currentUserId = req.user._id;
 
   const result = await messageService.deleteMessage({
     messageId,
     currentUserId,
+    deleteForEveryone: deleteForEveryone === "true",
   });
 
   if (!result) {
@@ -145,9 +149,8 @@ const deleteConversation = catchAsync(async (req, res, next) => {
     return res
       .status(404)
       .json({ message: "Conversation not found or unauthorized" });
-  }
+  } // Socket event participants
 
-  // Socket event participants
   if (req.io) {
     result.participants.forEach((participantId) => {
       req.io.to(participantId.toString()).emit("conversationDeleted", {
@@ -193,25 +196,24 @@ const forwardMessage = catchAsync(async (req, res) => {
     messageId,
     recipientIds,
   });
-  if (!result) {
-    console.log(result);
-    return res
-      .status(405)
-      .json({ message: "Something went wrong this may be serverError" });
+  if (result && result.length > 0) {
+    return res.status(201).json({ message: "Message Forwarded successfully" });
   }
-  res.status(201).json({ message: "Message Forwarded successfully" });
+  return res
+    .status(400)
+    .json({ message: "Message forwarding failed. Please try again." });
 });
 
 // controller
 const getSignedUrl = catchAsync(async (req, res) => {
   const { publicId } = req.params;
-  if (!publicId) return res.status(400).json({ error: "Public ID is required" });
+  if (!publicId)
+    return res.status(400).json({ error: "Public ID is required" });
 
   const resourceType = req.query.resourceType || "video";
   const format = req.query.format;
-  const forceMp3 = String(req.query.forceMp3 || "").toLowerCase() === "true";
+  const forceMp3 = String(req.query.forceMp3 || "").toLowerCase() === "true"; // 15 minute expiry
 
-  // 15 minute expiry
   const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
 
   if (resourceType === "video") {
@@ -221,9 +223,8 @@ const getSignedUrl = catchAsync(async (req, res) => {
       secure: true,
       sign_url: true,
       expires_at: expiresAt,
-    };
+    }; // audio: optionally transcode to mp3 for widest support
 
-    // audio: optionally transcode to mp3 for widest support
     if (forceMp3) {
       opts.format = "mp3";
       opts.transformation = [{ audio_codec: "mp3" }];
@@ -236,14 +237,17 @@ const getSignedUrl = catchAsync(async (req, res) => {
   }
 
   if (resourceType === "raw") {
-    const url = cloudinary.utils.private_download_url(publicId, format || "bin", {
-      resource_type: "raw",
-      type: "authenticated",
-      secure: true,
-      sign_url: true,
-      expires_at: expiresAt,
-      // don't set attachment:true so browsers can try inline view
-    });
+    const url = cloudinary.utils.private_download_url(
+      publicId,
+      format || "bin",
+      {
+        resource_type: "raw",
+        type: "authenticated",
+        secure: true,
+        sign_url: true,
+        expires_at: expiresAt, // don't set attachment:true so browsers can try inline view
+      }
+    );
     return res.json({ url });
   }
 
@@ -259,10 +263,31 @@ const getSignedUrl = catchAsync(async (req, res) => {
     return res.json({ url });
   }
 
-  const url = cloudinary.url(publicId, { resource_type: "image", secure: true });
+  const url = cloudinary.url(publicId, {
+    resource_type: "image",
+    secure: true,
+  });
   return res.json({ url });
 });
 
+// 💡 NEW: Delete For Me controller function
+const deleteMessageForMe = catchAsync(async (req, res, next) => {
+  const { messageId } = req.params;
+  const currentUserId = req.user._id;
+
+  const result = await messageService.deleteMessageForMe({
+    messageId,
+    currentUserId,
+  });
+
+  if (!result) {
+    return res
+      .status(404)
+      .json({ message: "Message not found or already deleted for you" });
+  }
+
+  res.status(200).json({ message: "Message deleted for you successfully" });
+});
 
 module.exports = {
   startConversation,
@@ -278,4 +303,5 @@ module.exports = {
   updateMessage,
   forwardMessage,
   getSignedUrl,
+  deleteMessageForMe, // 💡 NEW: Export the new function
 };

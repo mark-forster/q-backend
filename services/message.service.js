@@ -1,4 +1,3 @@
-// message.service.js
 const Message = require("../models/message.model");
 const Conversation = require("../models/conversation.model");
 const { getRecipientSocketId, io } = require("../socket/socket");
@@ -59,7 +58,7 @@ const findConversation = async (userId, otherUserId) => {
  * @param {array} params.files - An array of file objects to be uploaded.
  * @returns {Promise<object|null>} The new message object or null if an error occurred.
  */
-const sendMessage =  async ({ recipientId, conversationId, message, senderId, files }) => {
+const sendMessage = async ({ recipientId, conversationId, message, senderId, files }) => {
   try {
     // locate or create conversation
     let conversation;
@@ -117,9 +116,11 @@ const sendMessage =  async ({ recipientId, conversationId, message, senderId, fi
         const uploaded = await cloudinary.uploader.upload(file.path, uploadOptions);
         if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
 
-        // public URL for public images only; others will use signed URL on demand
-        const isPublicImage = (attachmentType === "image" || attachmentType === "gif") && uploadOptions.type !== "authenticated";
+        const isPublicImage =
+          (attachmentType === "image" || attachmentType === "gif") &&
+          uploadOptions.type !== "authenticated";
 
+        // Add cloudinary_type while keeping everything else intact
         return {
           type: attachmentType, // image | gif | video | audio | file
           url: isPublicImage ? uploaded.secure_url : null,
@@ -129,16 +130,17 @@ const sendMessage =  async ({ recipientId, conversationId, message, senderId, fi
           width: uploaded.width || null,
           height: uploaded.height || null,
           duration: uploaded.duration || null,
-          format: uploaded.format || null,            // webm/ogg/wav/mp3/png/mp4...
+          format: uploaded.format || null, // webm/ogg/wav/mp3/png/mp4...
           resource_type: uploaded.resource_type || null, // 'image' | 'video' | 'raw'
-          mimeType,                                       // 'audio/webm' etc.
+          cloudinary_type: uploadOptions.type || null, // "upload" | "authenticated"
+          mimeType, // 'audio/webm' etc.
         };
       });
 
       attachments = await Promise.all(uploadPromises);
     }
 
-    // create message
+    // create message (unchanged)
     const newMessage = await Message.create({
       conversationId: conversation._id,
       sender: senderId,
@@ -147,13 +149,13 @@ const sendMessage =  async ({ recipientId, conversationId, message, senderId, fi
       seenBy: [senderId],
     });
 
-    // lastMessage preview
+    // lastMessage preview (unchanged)
     let lastText = message || "";
     if (!lastText && attachments.length > 0) {
       const t = attachments[attachments.length - 1].type;
       lastText =
         t === "image" ? "Image" :
-        t === "gif"   ? "GIF"   :
+        t === "gif" ? "GIF" :
         t === "video" ? "Video" :
         t === "audio" ? "Audio" :
         `File: ${attachments[attachments.length - 1].name || "Attachment"}`;
@@ -162,12 +164,12 @@ const sendMessage =  async ({ recipientId, conversationId, message, senderId, fi
     conversation.lastMessage = { text: lastText, sender: senderId, seenBy: [senderId] };
     await conversation.save();
 
-    // realtime
+    // realtime (unchanged)
     io && io.to(conversation._id.toString()).emit("newMessage", newMessage);
     return newMessage;
   } catch (err) {
     console.error("Send Message Error:", err);
-    // cleanup temps
+    // cleanup temps (unchanged)
     if (files && files.length > 0) {
       for (const f of files) {
         try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {}
@@ -176,17 +178,27 @@ const sendMessage =  async ({ recipientId, conversationId, message, senderId, fi
     throw err;
   }
 };
+
 /**
  * Retrieves all messages for a given conversation.
  * @param {object} params - The parameters for getting messages.
  * @param {string} params.conversationId - The ID of the conversation.
+ * @param {string} params.userId - The ID of the current user.
  * @returns {Promise<object[]>} An array of message objects.
  */
-const getMessages = async ({ conversationId }) => {
-  const messages = await Message.find({ conversationId }).sort({
-    createdAt: 1,
-  });
-  return messages;
+const getMessages = async ({ conversationId, userId }) => {
+  try {
+    const messages = await Message.find({
+      conversationId,
+      deletedBy: { $ne: userId }
+    }).sort({
+      createdAt: 1,
+    });
+    return messages;
+  } catch (error) {
+    console.error("Get Messages Error:", error);
+    throw error;
+  }
 };
 
 /**
@@ -287,6 +299,7 @@ const removeFromGroup = async ({ conversationId, userId }) => {
 
 /**
  * Deletes a specific message and updates the last message of the conversation if necessary.
+ * 💡 UPDATED: This method now specifically handles 'delete for everyone'.
  * @param {object} params - The parameters for deleting a message.
  * @param {string} params.messageId - The ID of the message to delete.
  * @param {string} params.currentUserId - The ID of the user performing the deletion.
@@ -300,18 +313,43 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
     if (message.sender.toString() !== currentUserId.toString()) {
       throw new Error("You are not authorized to delete this message.");
     }
+    
+    // Check and delete attachments from Cloudinary if no other messages reference them.
+    if (message.attachments && message.attachments.length > 0) {
+      const promises = message.attachments.map(async (attachment) => {
+        const otherMessagesWithAttachment = await Message.countDocuments({
+          "attachments.public_id": attachment.public_id,
+          _id: { $ne: messageId },
+        });
 
+        if (otherMessagesWithAttachment === 0) {
+          try {
+            await cloudinary.uploader.destroy(attachment.public_id, {
+              resource_type: attachment.resource_type,
+              type: attachment.cloudinary_type,
+            });
+            console.log(`Successfully deleted Cloudinary resource: ${attachment.public_id}`);
+          } catch (error) {
+            console.error(`Error deleting Cloudinary resource ${attachment.public_id}:`, error);
+          }
+        } else {
+          console.log(`Resource ${attachment.public_id} is still referenced by ${otherMessagesWithAttachment} other messages. Skipping deletion.`);
+        }
+      });
+      await Promise.all(promises);
+    }
+    
     const conversationId = message.conversationId;
     const deletedMessageId = message._id;
     await Message.findByIdAndDelete(messageId);
-    const conversation = await Conversation.findById(conversationId); // Check if the deleted message was the last one in the conversation
+    const conversation = await Conversation.findById(conversationId);
 
     if (
       conversation &&
       conversation.lastMessage &&
       conversation.lastMessage.sender &&
       conversation.lastMessage.sender.toString() ===
-        message.sender.toString() &&
+      message.sender.toString() &&
       conversation.lastMessage.text === message.text
     ) {
       const lastMessage = await Message.findOne({ conversationId }).sort({
@@ -325,7 +363,7 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
           }
         : {};
       await conversation.save();
-    } // Emit socket event to all participants
+    }
 
     if (conversation) {
       io.to(conversation._id.toString()).emit("messageDeleted", {
@@ -342,45 +380,89 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
     };
   } catch (error) {
     console.error("Delete Message Error:", error);
-    return null;
+    throw error;
   }
 };
 
 /**
- * Deletes an entire conversation and all its messages.
+ * Deletes a conversation from a user's view, or permanently if all participants have deleted it.
  * @param {object} params - The parameters for deleting a conversation.
  * @param {string} params.conversationId - The ID of the conversation to delete.
  * @param {string} params.currentUserId - The ID of the user performing the deletion.
- * @returns {Promise<object|null>} The result object with deleted conversation ID and participants, or null on failure.
+ * @returns {Promise<object|null>} The result object or null on failure.
  */
 const deleteConversation = async ({ conversationId, currentUserId }) => {
   try {
-    const conversation = await Conversation.findById(conversationId);
-    if (!conversation) return null; // Check permissions to delete conversation
-
-    if (
-      !conversation.participants.some(
-        (p) => p.toString() === currentUserId.toString()
-      )
-    ) {
-      throw new Error("You are not authorized to delete this conversation.");
+    // Step 1: Add the current user to the conversation's deletedBy array.
+    const conversation = await Conversation.findByIdAndUpdate(
+      conversationId,
+      { $addToSet: { deletedBy: currentUserId } },
+      { new: true }
+    );
+    if (!conversation) {
+      throw new Error("Conversation not found.");
     }
+    
+    // Step 2: Check if ALL participants have deleted the conversation.
+    const totalParticipants = conversation.participants.length;
+    const deletedByCount = conversation.deletedBy.length;
+    
+    if (totalParticipants > 0 && totalParticipants === deletedByCount) {
+      console.log(`Conversation ${conversationId} deleted for all participants. Permanently deleting messages and files.`);
+      
+      // Permanently delete all messages associated with the conversation.
+      const messages = await Message.find({ conversationId });
+      if (messages.length > 0) {
+        // Find and delete associated files from Cloudinary
+        for (const message of messages) {
+          if (message.attachments && message.attachments.length > 0) {
+            for (const attachment of message.attachments) {
+              // Check if the file is used in ANY other conversation
+              const isReferencedByOtherConversations = await Message.exists({
+                "attachments.public_id": attachment.public_id,
+                conversationId: { $ne: conversationId }
+              });
 
-    const participants = conversation.participants;
-    const deletedConversationId = conversation._id; // Delete all messages in the conversation
+              if (!isReferencedByOtherConversations) {
+                try {
+                  await cloudinary.uploader.destroy(attachment.public_id, {
+                    resource_type: attachment.resource_type,
+                    type: attachment.cloudinary_type,
+                  });
+                  console.log(`Successfully deleted Cloudinary resource: ${attachment.public_id}`);
+                } catch (error) {
+                  console.error(`Error deleting Cloudinary resource ${attachment.public_id}:`, error);
+                }
+              } else {
+                console.log(`Resource ${attachment.public_id} is still referenced in other conversations. Skipping deletion.`);
+              }
+            }
+          }
+        }
+      }
 
-    await Message.deleteMany({ conversationId }); // Delete the conversation itself
+      // Finally, permanently delete the messages and the conversation from the database.
+      await Message.deleteMany({ conversationId });
+      await Conversation.findByIdAndDelete(conversationId);
+      
+      // Emit socket event to notify all clients that the conversation is permanently gone.
+      io.to(conversationId.toString()).emit("conversationPermanentlyDeleted", {
+        conversationId: conversationId.toString(),
+      });
 
-    await Conversation.findByIdAndDelete(conversationId); // Emit socket event to all participants
-
-    io.to(deletedConversationId.toString()).emit("conversationDeleted", {
-      conversationId: deletedConversationId.toString(),
-    });
-
-    return { deletedConversationId, participants };
+      return { permanentlyDeleted: true, conversationId: conversationId.toString() };
+      
+    } else {
+      console.log(`Conversation ${conversationId} deleted for user ${currentUserId}. Not yet permanently deleted.`);
+      
+      // Emit a socket event to the current user only (optional)
+      // or simply rely on the frontend's local state update.
+      
+      return { permanentlyDeleted: false, conversationId: conversationId.toString() };
+    }
   } catch (error) {
     console.error("Delete Conversation Error:", error);
-    return null;
+    throw error;
   }
 };
 
@@ -427,7 +509,7 @@ const updateMessage = async ({ messageId, newText, currentUserId }) => {
 
 /**
  * @param {object} params
- *  * @param {string} params.messageId - The ID of the message to update.
+ * * @param {string} params.messageId - The ID of the message to update.
  * @param {string} params.currentUserId - The new text for the message.
  * @param {string} params.participantIds - The ID of the user performing the update.
  *
@@ -438,7 +520,7 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
     const originalMessage = await Message.findById(messageId);
     // console.log(originalMessage);
     if (!originalMessage) {
-      return res.status(404).json({ error: "Original message not found" });
+      throw new Error("Original message not found");
     }
     // forward message array
     const forwardedMessages = [];
@@ -457,36 +539,106 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
         });
         await conversation.save();
       }
-
-      // create new Message
       const newMessage = new Message({
         sender: currentUserId,
         receiver: recipientId,
         conversationId: conversation._id,
         text: originalMessage.text,
-        img: originalMessage.img
-          ? {
-              public_id: originalMessage.img.public_id || null,
-              url: originalMessage.img.url || null,
-            }
-          : null,
+        attachments: originalMessage.attachments || [],
+        seenBy: [currentUserId],
+        isForwarded: true,
       });
 
       await newMessage.save();
 
-      // Conversation lastMessage message  update
+      // Conversation lastMessage message update
+      let lastText = originalMessage.text || "";
+      if (!lastText && originalMessage.attachments && originalMessage.attachments.length > 0) {
+        const t = originalMessage.attachments[0].type;
+        lastText =
+          t === "image" ? "Image" :
+          t === "gif" ? "GIF" :
+          t === "video" ? "Video" :
+          t === "audio" ? "Audio" :
+          `File: ${originalMessage.attachments[0].name || "Attachment"}`;
+      }
       conversation.lastMessage = {
-        text: originalMessage.text,
-        sender: originalMessage.sender,
+        text: lastText,
+        sender: currentUserId,
+        seenBy: [currentUserId]
       };
       await conversation.save();
 
       forwardedMessages.push(newMessage);
+      // realtime (unchanged)
+     io && io.to(conversation._id.toString()).emit("newMessage", newMessage);
     }
     return forwardedMessages;
   } catch (error) {
     console.error("Error forwarding message:", error);
-    res.status(500).json({ error: "Internal server error" });
+    throw error;
+  }
+};
+
+// 💡 This is the new, separate function to handle 'delete for me' logic.
+const deleteMessageForMe = async ({ messageId, currentUserId }) => {
+  try {
+    // Step 1: Add the user ID to the message's deletedBy array.
+    const message = await Message.findByIdAndUpdate(
+      messageId,
+      { $addToSet: { deletedBy: currentUserId } },
+      { new: true }
+    );
+
+    if (!message) {
+      throw new Error("Message not found or update failed.");
+    }
+
+    // Step 2: Get the conversation to find the total number of participants.
+    const conversation = await Conversation.findById(message.conversationId);
+    if (!conversation) {
+      return { messageId, permanentlyDeleted: false };
+    }
+
+    const totalParticipants = conversation.participants.length;
+    const deletedByCount = message.deletedBy.length;
+
+    // Step 3: Check if all participants have deleted the message.
+    if (totalParticipants > 0 && totalParticipants === deletedByCount) {
+      console.log(`Message ${messageId} deleted for all participants. Permanently deleting from DB.`);
+      
+      // Permanently delete the message and its attachments if not referenced elsewhere.
+      await Message.findByIdAndDelete(messageId);
+
+      if (message.attachments && message.attachments.length > 0) {
+        for (const attachment of message.attachments) {
+          const isReferencedByOtherMessages = await Message.exists({
+            "attachments.public_id": attachment.public_id,
+            // Note: We don't need to exclude the current message here because it's already deleted.
+          });
+
+          if (!isReferencedByOtherMessages) {
+            try {
+              await cloudinary.uploader.destroy(attachment.public_id, {
+                resource_type: attachment.resource_type,
+                type: attachment.cloudinary_type,
+              });
+              console.log(`Successfully deleted Cloudinary resource: ${attachment.public_id}`);
+            } catch (error) {
+              console.error(`Error deleting Cloudinary resource ${attachment.public_id}:`, error);
+            }
+          } else {
+            console.log(`Resource ${attachment.public_id} is still referenced by other messages. Skipping deletion.`);
+          }
+        }
+      }
+      return { messageId, permanentlyDeleted: true };
+    }
+
+    return { messageId, permanentlyDeleted: false };
+  } catch (error) {
+    console.error("Error in deleteMessageForMe service:", error);
+    throw error;
   }
 };
 
@@ -503,4 +655,5 @@ module.exports = {
   deleteConversation,
   updateMessage,
   forwardMessage,
+  deleteMessageForMe,
 };
