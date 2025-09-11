@@ -1,13 +1,16 @@
 const mongoose = require('mongoose');
 require('dotenv').config();
 const path=require('path')
+const { config } = require('../config');
+
 const connectDB= async()=>{
-    try{
-        const connectionInstance= await mongoose.connect(process.env.DB_URL)
-        console.log(`DB connection: ${process.env.DB_URL}`)
-    }
-    catch(err){
-        console.error(err);
-    }
+    mongoose.set('strictQuery', true);
+  try {
+    await mongoose.connect(config.mongo.uri);
+    console.log(`[DB] Connected → ${config.isProd ? 'PROD' : 'DEV'}`);
+  } catch (err) {
+    console.error('[DB] Connection error:', err.message);
+    process.exit(1);
+  }
 }
 module.exports = connectDB;

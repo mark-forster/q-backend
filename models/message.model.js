@@ -89,3 +89,6 @@ const messageSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model("Message", messageSchema);
+messageSchema.index({ conversationId: 1, _id: -1 });
+messageSchema.index({ 'attachments.public_id': 1 });
+messageSchema.index({ sender: 1, createdAt: -1 });

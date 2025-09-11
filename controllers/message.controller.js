@@ -245,7 +245,7 @@ const getSignedUrl = catchAsync(async (req, res) => {
         type: "authenticated",
         secure: true,
         sign_url: true,
-        expires_at: expiresAt, // don't set attachment:true so browsers can try inline view
+        expires_at: expiresAt,
       }
     );
     return res.json({ url });
