@@ -1,6 +1,6 @@
 const Message = require("../models/message.model");
 const Conversation = require("../models/conversation.model");
-const { getRecipientSocketId, io } = require("../socket/socket");
+const { io } = require("../socket/socket");
 const cloudinary = require("cloudinary").v2;
 const fs = require("fs");
 
@@ -46,138 +46,146 @@ const findConversation = async (userId, otherUserId) => {
     return null;
   }
 };
+// 💡 UPDATED: Added a helper function to get the recipient's socket ID (if needed, although we are now using rooms)
+const getRecipientSocketId = (recipientId) => {
+  const { userSocketMap } = require("../socket/socket");
+  return userSocketMap.get(String(recipientId));
+};
 
-/**
- * Sends a message and handles file uploads to Cloudinary.
- *
- * @param {object} params - The parameters for the function.
- * @param {string} params.recipientId - The ID of the recipient.
- * @param {string} params.conversationId - The ID of the conversation.
- * @param {string} params.message - The text of the message.
- * @param {string} params.senderId - The ID of the sender.
- * @param {array} params.files - An array of file objects to be uploaded.
- * @returns {Promise<object|null>} The new message object or null if an error occurred.
- */
 const sendMessage = async ({ recipientId, conversationId, message, senderId, files }) => {
-  try {
-    // locate or create conversation
-    let conversation;
-    const isMock = String(conversationId || "").startsWith("mock-");
+    try {
+        let conversation = await Conversation.findOne({ participants: { $all: [senderId, recipientId] } }).populate({
+            path: "participants",
+            select: "username profilePic name updatedAt",
+        });
 
-    if (isMock) {
-      conversation = await Conversation.findOne({ participants: { $all: [senderId, recipientId] } });
-      if (!conversation) {
-        conversation = await Conversation.create({ isGroup: false, participants: [senderId, recipientId] });
-      }
-    } else if (conversationId) {
-      conversation = await Conversation.findById(conversationId);
-      if (!conversation) throw new Error("Conversation not found");
-    } else {
-      conversation = await Conversation.findOne({ participants: { $all: [senderId, recipientId] } });
-      if (!conversation) {
-        conversation = await Conversation.create({ isGroup: false, participants: [senderId, recipientId] });
-      }
-    }
+        const isNewConversation = !conversation;
 
-    // uploads
-    let attachments = [];
-    if (files && files.length > 0) {
-      const uploadPromises = files.map(async (file) => {
-        const mimeType = file.mimetype || "";
-        const uploadOptions = { secure: true, type: "upload", resource_type: "auto" };
-        let attachmentType;
-
-        if (mimeType.startsWith("image/")) {
-          attachmentType = mimeType === "image/gif" ? "gif" : "image";
-          uploadOptions.resource_type = "image";
-          uploadOptions.type = "upload"; // public ok for images
-        } else if (mimeType.startsWith("video/")) {
-          attachmentType = "video";
-          uploadOptions.resource_type = "video";
-          uploadOptions.type = "authenticated";
-        } else if (mimeType.startsWith("audio/")) {
-          // IMPORTANT: audio stored under resource_type 'video'
-          attachmentType = "audio";
-          uploadOptions.resource_type = "video";
-          uploadOptions.type = "authenticated";
-          // optional eager mp3 for broad support:
-          // uploadOptions.eager = [{ format: "mp3", audio_codec: "mp3" }];
-          // uploadOptions.eager_async = true;
-        } else if (mimeType.startsWith("application/")) {
-          attachmentType = "file";
-          uploadOptions.resource_type = "raw";
-          uploadOptions.type = "authenticated";
-        } else {
-          attachmentType = "file";
-          uploadOptions.resource_type = "raw";
-          uploadOptions.type = "authenticated";
+        if (isNewConversation) {
+            conversation = await Conversation.create({
+                isGroup: false,
+                participants: [senderId, recipientId],
+            });
+            conversation = await conversation.populate({
+                path: "participants",
+                select: "username profilePic name updatedAt",
+            });
         }
 
-        const uploaded = await cloudinary.uploader.upload(file.path, uploadOptions);
-        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        let attachments = [];
+        if (files && files.length > 0) {
+            const uploadPromises = files.map(async (file) => {
+                const mimeType = file.mimetype || "";
+                const uploadOptions = { secure: true, type: "upload", resource_type: "auto" };
+                let attachmentType;
 
-        const isPublicImage =
-          (attachmentType === "image" || attachmentType === "gif") &&
-          uploadOptions.type !== "authenticated";
+                if (mimeType.startsWith("image/")) {
+                    attachmentType = mimeType === "image/gif" ? "gif" : "image";
+                    uploadOptions.resource_type = "image";
+                    uploadOptions.type = "upload";
+                } else if (mimeType.startsWith("video/")) {
+                    attachmentType = "video";
+                    uploadOptions.resource_type = "video";
+                    uploadOptions.type = "authenticated";
+                } else if (mimeType.startsWith("audio/")) {
+                    attachmentType = "audio";
+                    uploadOptions.resource_type = "video";
+                    uploadOptions.type = "authenticated";
+                } else if (mimeType.startsWith("application/")) {
+                    attachmentType = "file";
+                    uploadOptions.resource_type = "raw";
+                    uploadOptions.type = "authenticated";
+                } else {
+                    attachmentType = "file";
+                    uploadOptions.resource_type = "raw";
+                    uploadOptions.type = "authenticated";
+                }
 
-        // Add cloudinary_type while keeping everything else intact
-        return {
-          type: attachmentType, // image | gif | video | audio | file
-          url: isPublicImage ? uploaded.secure_url : null,
-          public_id: uploaded.public_id,
-          name: file.originalname || null,
-          size: file.size || null,
-          width: uploaded.width || null,
-          height: uploaded.height || null,
-          duration: uploaded.duration || null,
-          format: uploaded.format || null, // webm/ogg/wav/mp3/png/mp4...
-          resource_type: uploaded.resource_type || null, // 'image' | 'video' | 'raw'
-          cloudinary_type: uploadOptions.type || null, // "upload" | "authenticated"
-          mimeType, // 'audio/webm' etc.
+                const uploaded = await cloudinary.uploader.upload(file.path, uploadOptions);
+                if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+
+                const isPublicImage =
+                    (attachmentType === "image" || attachmentType === "gif") &&
+                    uploadOptions.type !== "authenticated";
+
+                return {
+                    type: attachmentType,
+                    url: isPublicImage ? uploaded.secure_url : null,
+                    public_id: uploaded.public_id,
+                    name: file.originalname || null,
+                    size: file.size || null,
+                    width: uploaded.width || null,
+                    height: uploaded.height || null,
+                    duration: uploaded.duration || null,
+                    format: uploaded.format || null,
+                    resource_type: uploaded.resource_type || null,
+                    cloudinary_type: uploadOptions.type || null,
+                    mimeType,
+                };
+            });
+
+            attachments = await Promise.all(uploadPromises);
+        }
+
+        const newMessage = await Message.create({
+            conversationId: conversation._id,
+            sender: senderId,
+            text: message || "",
+            attachments,
+            seenBy: [senderId],
+        });
+
+        let lastText = message || "";
+        if (!lastText && attachments.length > 0) {
+            const t = attachments[attachments.length - 1].type;
+            lastText =
+                t === "image" ? "Image" :
+                t === "gif" ? "GIF" :
+                t === "video" ? "Video" :
+                t === "audio" ? "Audio" :
+                `File: ${attachments[attachments.length - 1].name || "Attachment"}`;
+        }
+
+        conversation.lastMessage = {
+            text: lastText,
+            sender: senderId,
+            seenBy: [senderId],
+            updatedAt: new Date(),
         };
-      });
+        await conversation.save();
 
-      attachments = await Promise.all(uploadPromises);
+        if (io) {
+            // FIX: Emit only to the recipient, not the whole conversation room.
+            const recipientSocketId = getRecipientSocketId(recipientId);
+            if (recipientSocketId) {
+                io.to(recipientSocketId).emit("newMessage", newMessage);
+            }
+
+            if (isNewConversation) {
+                const recipient = conversation.participants.find(
+                    (p) => p._id.toString() !== senderId.toString()
+                );
+                if (recipient) {
+                    const recipientSocketIdForConv = getRecipientSocketId(recipient._id.toString());
+                    if (recipientSocketIdForConv) {
+                         io.to(recipientSocketIdForConv).emit("conversationCreated", conversation);
+                    }
+                }
+            }
+        }
+
+        return newMessage;
+    } catch (err) {
+        console.error("Send Message Error:", err);
+        if (files && files.length > 0) {
+            for (const f of files) {
+                try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {}
+            }
+        }
+        throw err;
     }
-
-    // create message (unchanged)
-    const newMessage = await Message.create({
-      conversationId: conversation._id,
-      sender: senderId,
-      text: message || "",
-      attachments,
-      seenBy: [senderId],
-    });
-
-    // lastMessage preview (unchanged)
-    let lastText = message || "";
-    if (!lastText && attachments.length > 0) {
-      const t = attachments[attachments.length - 1].type;
-      lastText =
-        t === "image" ? "Image" :
-        t === "gif" ? "GIF" :
-        t === "video" ? "Video" :
-        t === "audio" ? "Audio" :
-        `File: ${attachments[attachments.length - 1].name || "Attachment"}`;
-    }
-
-    conversation.lastMessage = { text: lastText, sender: senderId, seenBy: [senderId] };
-    await conversation.save();
-
-    // realtime (unchanged)
-    io && io.to(conversation._id.toString()).emit("newMessage", newMessage);
-    return newMessage;
-  } catch (err) {
-    console.error("Send Message Error:", err);
-    // cleanup temps (unchanged)
-    if (files && files.length > 0) {
-      for (const f of files) {
-        try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {}
-      }
-    }
-    throw err;
-  }
 };
+
 
 /**
  * Retrieves all messages for a given conversation.
