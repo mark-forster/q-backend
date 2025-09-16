@@ -32,7 +32,7 @@ app.use(cookieParser());
 const allowedOrigins = (config.isProd
   ? config.cors.prodOrigins
   : config.cors.devOrigins
-).concat(config.cors.legacy);
+).concat(config.cors.legacy || []);
 
 app.use(
   cors({

@@ -5,7 +5,7 @@ const http = require("http");
 const express = require("express");
 const app = express();
 const server = http.createServer(app);
-
+const { config } = require('../config'); // <-- config file ကို import လုပ်ပါ
 const Conversation = require("../models/conversation.model");
 const Message = require("../models/message.model");
 
@@ -15,10 +15,7 @@ const userSocketMap = new Map();
 // Setting up the socket server
 const io = new Server(server, {
   cors: {
-    origin: [
-      process.env.RENDER_HOST,
-      process.env.DOMAINHOST, // Frontend origin(s)
-    ],
+    origin: config.cors.prodOrigins,
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
   },
