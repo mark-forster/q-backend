@@ -35,6 +35,9 @@ router.put("/update/:messageId", isAuth, messageController.updateMessage);
 // Message delete route 
 router.delete("/message/:messageId", isAuth, messageController.deleteMessage);
 router.delete("/message/for-me/:messageId", isAuth, messageController.deleteMessageForMe);
+// message seen
+router.put("/seen/:conversationId", isAuth, messageController.updateMessagesSeenStatus);
+
 // Conversation delete route
 router.delete(
   "/conversation/:conversationId",

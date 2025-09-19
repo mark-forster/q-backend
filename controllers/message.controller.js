@@ -289,6 +289,27 @@ const deleteMessageForMe = catchAsync(async (req, res, next) => {
   res.status(200).json({ message: "Message deleted for you successfully" });
 });
 
+// message Seen Status
+const updateMessagesSeenStatus = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.user._id;
+
+    if (!conversationId) {
+      return res.status(400).json({ error: "Conversation ID is required." });
+    }
+
+    // Call the updated service function
+    await messageService.updateMessagesSeenStatus({ conversationId, userId });
+    res.status(200).json({ message: "Messages seen status updated successfully." });
+  } catch (error) {
+    console.error("Update Messages Seen Status Controller Error:", error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+
+
 module.exports = {
   startConversation,
   sendMessage,
@@ -303,5 +324,6 @@ module.exports = {
   updateMessage,
   forwardMessage,
   getSignedUrl,
-  deleteMessageForMe, // 💡 NEW: Export the new function
+  deleteMessageForMe,
+  updateMessagesSeenStatus
 };

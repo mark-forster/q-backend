@@ -137,13 +137,19 @@ const sendMessage = async ({ recipientId, conversationId, message, senderId, fil
 
         let lastText = message || "";
         if (!lastText && attachments.length > 0) {
-            const t = attachments[attachments.length - 1].type;
-            lastText =
-                t === "image" ? "Image" :
-                t === "gif" ? "GIF" :
-                t === "video" ? "Video" :
-                t === "audio" ? "Audio" :
-                `File: ${attachments[attachments.length - 1].name || "Attachment"}`;
+           const t = attachments[attachments.length - 1].type;
+            if (t === "image") {
+                lastText = "Image";
+            } else if (t === "gif") {
+                lastText = "GIF";
+            } else if (t === "video") {
+                lastText = "Video";
+            } else if (t === "audio") {
+                lastText = "Audio";
+            } else {
+                // Corrected to show only "File" as requested
+                lastText = "File";
+            }
         }
 
         conversation.lastMessage = {
@@ -524,68 +530,88 @@ const updateMessage = async ({ messageId, newText, currentUserId }) => {
  *
  */
 const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
-  try {
-    const originalMessage = await Message.findById(messageId);
-    // console.log(originalMessage);
-    if (!originalMessage) {
-      throw new Error("Original message not found");
+    try {
+        const originalMessage = await Message.findById(messageId);
+        if (!originalMessage) {
+            throw new Error("Original message not found");
+        }
+
+        const forwardedMessages = [];
+
+        for (const recipientId of recipientIds) {
+            let conversation = await Conversation.findOne({
+                participants: { $all: [currentUserId, recipientId] },
+            }).populate({
+                path: "participants",
+                select: "username profilePic name",
+            });
+
+            const isNewConversation = !conversation;
+
+            if (isNewConversation) {
+                conversation = await Conversation.create({
+                    isGroup: false,
+                    participants: [currentUserId, recipientId],
+                });
+                // Conversation အသစ်ကို populate လုပ်ထားမှသာ client မှာ လိုအပ်တဲ့ data တွေရမယ်
+                conversation = await conversation.populate("participants", "username name profilePic");
+            }
+
+            const newMessage = await Message.create({
+                sender: currentUserId,
+                conversationId: conversation._id,
+                text: originalMessage.text,
+                attachments: originalMessage.attachments || [],
+                seenBy: [currentUserId],
+                isForwarded: true,
+            });
+
+            // Conversation ရဲ့ lastMessage ကို update လုပ်ပါ
+            let lastText = originalMessage.text || "";
+            if (!lastText && originalMessage.attachments && originalMessage.attachments.length > 0) {
+                const t = originalMessage.attachments[0].type;
+                lastText = t === "image" ? "Image" : "File";
+            }
+            conversation.lastMessage = {
+                text: lastText,
+                sender: currentUserId,
+                seenBy: [currentUserId]
+            };
+            await conversation.save();
+
+            // newMessage ကို populate လုပ်ပြီးမှ event ထဲမှာ ထည့်ပြီး ပြန်ပို့ဖို့
+            const populatedNewMessage = await newMessage.populate("sender", "username profilePic");
+            forwardedMessages.push(populatedNewMessage);
+
+            // Socket.IO Logic
+            const senderSocketId = getRecipientSocketId(currentUserId);
+            const recipientSocketId = getRecipientSocketId(recipientId);
+
+            // လက်ခံသူဆီကို event ပို့မယ်
+            if (recipientSocketId) {
+                // conversation အသစ်ဆိုရင် conversationCreated event ကို ပို့မယ်
+                if (isNewConversation) {
+                    io.to(recipientSocketId).emit("conversationCreated", conversation);
+                }
+                // ရှိပြီးသားဖြစ်ဖြစ်၊ အသစ်ဖြစ်ဖြစ် newMessage event ပို့မယ်
+                io.to(recipientSocketId).emit("newMessage", populatedNewMessage);
+            }
+
+            // sender (လက်ရှိ user) ဆီကို event ပို့မယ်
+            if (senderSocketId) {
+                if (isNewConversation) {
+                    // Conversation အသစ်ဆိုရင် sender ဆီကိုလည်း conversationCreated event ပို့မယ်
+                    io.to(senderSocketId).emit("conversationCreated", conversation);
+                }
+                // newMessage event ကိုလည်း ပို့မယ် (မလိုရင် ဖယ်နိုင်သည်၊ ဒါပေမဲ့ ရှိပြီးသား conversation မှာ message update အတွက် အသုံးဝင်)
+                io.to(senderSocketId).emit("newMessage", populatedNewMessage);
+            }
+        }
+        return forwardedMessages;
+    } catch (error) {
+        console.error("Error forwarding message:", error);
+        throw error;
     }
-    // forward message array
-    const forwardedMessages = [];
-
-    // create Message for each recipient(recive users)
-    for (const recipientId of recipientIds) {
-      // check conversation already exists
-      let conversation = await Conversation.findOne({
-        participants: { $all: [currentUserId, recipientId] },
-      });
-
-      // conversation create if not already exist
-      if (!conversation) {
-        conversation = new Conversation({
-          participants: [currentUserId, recipientId],
-        });
-        await conversation.save();
-      }
-      const newMessage = new Message({
-        sender: currentUserId,
-        receiver: recipientId,
-        conversationId: conversation._id,
-        text: originalMessage.text,
-        attachments: originalMessage.attachments || [],
-        seenBy: [currentUserId],
-        isForwarded: true,
-      });
-
-      await newMessage.save();
-
-      // Conversation lastMessage message update
-      let lastText = originalMessage.text || "";
-      if (!lastText && originalMessage.attachments && originalMessage.attachments.length > 0) {
-        const t = originalMessage.attachments[0].type;
-        lastText =
-          t === "image" ? "Image" :
-          t === "gif" ? "GIF" :
-          t === "video" ? "Video" :
-          t === "audio" ? "Audio" :
-          `File: ${originalMessage.attachments[0].name || "Attachment"}`;
-      }
-      conversation.lastMessage = {
-        text: lastText,
-        sender: currentUserId,
-        seenBy: [currentUserId]
-      };
-      await conversation.save();
-
-      forwardedMessages.push(newMessage);
-      // realtime (unchanged)
-     io && io.to(conversation._id.toString()).emit("newMessage", newMessage);
-    }
-    return forwardedMessages;
-  } catch (error) {
-    console.error("Error forwarding message:", error);
-    throw error;
-  }
 };
 
 // 💡 This is the new, separate function to handle 'delete for me' logic.
@@ -650,6 +676,40 @@ const deleteMessageForMe = async ({ messageId, currentUserId }) => {
   }
 };
 
+const updateMessagesSeenStatus = async ({ conversationId, userId }) => {
+  try {
+    const updatedMessages = await Message.updateMany(
+      {
+        conversationId,
+        "seenBy": { "$ne": userId }
+      },
+      {
+        "$addToSet": { "seenBy": userId }
+      }
+    );
+    await Conversation.findByIdAndUpdate(
+      conversationId,
+      { "$addToSet": { "lastMessage.seenBy": userId } },
+      { new: true }
+    );
+
+    if (io) {
+      io.to(conversationId).emit("messagesSeen", {
+        conversationId,
+        userId,
+      });
+      console.log(`User ${userId} seen messages in conversation ${conversationId}`);
+    }
+
+    return updatedMessages;
+  } catch (error) {
+    console.error("Update Messages Seen Status Error:", error);
+    throw error;
+  }
+};
+
+
+
 module.exports = {
   sendMessage,
   findConversation,
@@ -664,4 +724,5 @@ module.exports = {
   updateMessage,
   forwardMessage,
   deleteMessageForMe,
+  updateMessagesSeenStatus
 };
