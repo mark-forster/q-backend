@@ -58,6 +58,15 @@ const sendMessage = async ({ recipientId, conversationId, message, senderId, fil
             path: "participants",
             select: "username profilePic name updatedAt",
         });
+        if (conversation) {
+      if (conversation.deletedBy && conversation.deletedBy.includes(senderId)) {
+       
+        conversation.deletedBy = conversation.deletedBy.filter(
+          (id) => id.toString() !== senderId.toString()
+        );
+        await conversation.save();
+      }
+    }
 
         const isNewConversation = !conversation;
 
@@ -224,6 +233,7 @@ const getConversations = async (userId) => {
   try {
     const conversations = await Conversation.find({
       participants: userId,
+      deletedBy: { $ne: userId }
     }).populate({
       path: "participants",
       select: "username profilePic name updatedAt",
@@ -416,7 +426,12 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
     if (!conversation) {
       throw new Error("Conversation not found.");
     }
-    
+      await Message.updateMany(
+            { conversationId },
+            { $addToSet: { deletedBy: currentUserId } }
+        ); 
+
+
     // Step 2: Check if ALL participants have deleted the conversation.
     const totalParticipants = conversation.participants.length;
     const deletedByCount = conversation.deletedBy.length;
