@@ -568,7 +568,6 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
                     isGroup: false,
                     participants: [currentUserId, recipientId],
                 });
-                // Conversation အသစ်ကို populate လုပ်ထားမှသာ client မှာ လိုအပ်တဲ့ data တွေရမယ်
                 conversation = await conversation.populate("participants", "username name profilePic");
             }
 
@@ -581,7 +580,6 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
                 isForwarded: true,
             });
 
-            // Conversation ရဲ့ lastMessage ကို update လုပ်ပါ
             let lastText = originalMessage.text || "";
             if (!lastText && originalMessage.attachments && originalMessage.attachments.length > 0) {
                 const t = originalMessage.attachments[0].type;
@@ -594,7 +592,6 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
             };
             await conversation.save();
 
-            // newMessage ကို populate လုပ်ပြီးမှ event ထဲမှာ ထည့်ပြီး ပြန်ပို့ဖို့
             const populatedNewMessage = await newMessage.populate("sender", "username profilePic");
             forwardedMessages.push(populatedNewMessage);
 
@@ -602,23 +599,17 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
             const senderSocketId = getRecipientSocketId(currentUserId);
             const recipientSocketId = getRecipientSocketId(recipientId);
 
-            // လက်ခံသူဆီကို event ပို့မယ်
             if (recipientSocketId) {
-                // conversation အသစ်ဆိုရင် conversationCreated event ကို ပို့မယ်
                 if (isNewConversation) {
                     io.to(recipientSocketId).emit("conversationCreated", conversation);
                 }
-                // ရှိပြီးသားဖြစ်ဖြစ်၊ အသစ်ဖြစ်ဖြစ် newMessage event ပို့မယ်
                 io.to(recipientSocketId).emit("newMessage", populatedNewMessage);
             }
 
-            // sender (လက်ရှိ user) ဆီကို event ပို့မယ်
             if (senderSocketId) {
                 if (isNewConversation) {
-                    // Conversation အသစ်ဆိုရင် sender ဆီကိုလည်း conversationCreated event ပို့မယ်
                     io.to(senderSocketId).emit("conversationCreated", conversation);
                 }
-                // newMessage event ကိုလည်း ပို့မယ် (မလိုရင် ဖယ်နိုင်သည်၊ ဒါပေမဲ့ ရှိပြီးသား conversation မှာ message update အတွက် အသုံးဝင်)
                 io.to(senderSocketId).emit("newMessage", populatedNewMessage);
             }
         }
