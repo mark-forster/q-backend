@@ -80,6 +80,10 @@ const messageSchema = new mongoose.Schema(
         }
     ],
     seenBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+     isRead: {
+            type: Boolean,
+            default: false,
+        },
     isForwarded: {
       type: Boolean,
       default: false,

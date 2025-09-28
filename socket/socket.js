@@ -1,18 +1,15 @@
-// socket.js
-
+// socket/socket.js
 const { Server } = require("socket.io");
 const http = require("http");
 const express = require("express");
 const app = express();
 const server = http.createServer(app);
-const { config } = require('../config'); // <-- config file ကို import လုပ်ပါ
+const { config } = require("../config");
 const Conversation = require("../models/conversation.model");
-const Message = require("../models/message.model");
 
-// Map to store userId and socketId pairs
+// userId <-> socketId
 const userSocketMap = new Map();
 
-// Setting up the socket server
 const io = new Server(server, {
   cors: {
     origin: config.cors.prodOrigins,
@@ -21,43 +18,76 @@ const io = new Server(server, {
   },
 });
 
-// Getting the recipient's socketId
-const getRecipientSocketId = (recipientId) => {
-  return userSocketMap.get(String(recipientId));
-};
+// helper
+const getRecipientSocketId = (recipientId) => userSocketMap.get(String(recipientId));
 
-// Logic to be executed when a client connects
 io.on("connection", async (socket) => {
   const { userId } = socket.handshake.query || {};
   if (!userId) return;
 
+  // personal room for direct emits if needed
   socket.join(userId);
 
-  userSocketMap.set(userId, socket.id);
+  // track online users
+  userSocketMap.set(String(userId), socket.id);
   io.emit("getOnlineUsers", Array.from(userSocketMap.keys()));
 
   try {
-    const userConversations = await Conversation.find({
-      participants: userId,
-    }).select("_id");
+    // join all conversation rooms for this user
+    const userConversations = await Conversation.find({ participants: userId }).select("_id");
+    userConversations.forEach(({ _id }) => socket.join(_id.toString()));
 
-    userConversations.forEach(({ _id }) => {
-      socket.join(_id.toString());
+    // -----------------------------------------------------------
+    // WebRTC Signaling Events
+    // -----------------------------------------------------------
+
+    socket.on("callUser", ({ userToCall, signalData, from, name }) => {
+      try {
+        const recipientSocketId = getRecipientSocketId(userToCall);
+        if (!recipientSocketId) {
+          return socket.emit("callFailed", { reason: "Recipient is not online." });
+        }
+        io.to(recipientSocketId).emit("incomingCall", {
+          signal: signalData,
+          from,
+          name,
+        });
+      } catch (err) {
+        console.error("Error in callUser event:", err);
+      }
     });
+
+    socket.on("answerCall", (data) => {
+      try {
+        const callerSocketId = getRecipientSocketId(data.to);
+        if (!callerSocketId) {
+          return console.log("Caller socket not found.");
+        }
+        io.to(callerSocketId).emit("callAccepted", data.signal);
+      } catch (err) {
+        console.error("Error in answerCall event:", err);
+      }
+    });
+    socket.on("endCall", ({ to }) => {
+      try {
+        const recipientSocketId = getRecipientSocketId(to);
+        if (!recipientSocketId) return;
+        io.to(recipientSocketId).emit("callEnded");
+      } catch (err) {
+        console.error("Error in endCall event:", err);
+      }
+    });
+
+    socket.on("joinConversationRoom", ({ conversationId }) => {
+      if (conversationId) socket.join(String(conversationId));
+    });
+
   } catch (err) {
-    console.error("Error joining conversation rooms:", err);
+    console.error("Error joining conversation rooms or setting up socket listeners:", err);
   }
 
-  // 💡 အသစ်ထပ်ထည့်ရန်: Frontend က ပို့လိုက်တဲ့ "joinConversationRoom" event ကို နားထောင်ပါ
-  socket.on("joinConversationRoom", ({ conversationId }) => {
-    socket.join(conversationId);
-    console.log(`User ${userId} joined conversation room: ${conversationId}`);
-  }); // When a client disconnects
-
   socket.on("disconnect", () => {
-    // Removing the user from userSocketMap
-    userSocketMap.delete(userId);
-    // Emitting the new list of online users to clients
+    userSocketMap.delete(String(userId));
     io.emit("getOnlineUsers", Array.from(userSocketMap.keys()));
   });
 });
