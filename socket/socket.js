@@ -41,7 +41,8 @@ io.on("connection", async (socket) => {
     // WebRTC Signaling Events
     // -----------------------------------------------------------
 
-    socket.on("callUser", ({ userToCall, signalData, from, name }) => {
+    // 1. Call one-on-one
+    socket.on("callUser", ({ userToCall, signalData, from, name, callType }) => {
       try {
         const recipientSocketId = getRecipientSocketId(userToCall);
         if (!recipientSocketId) {
@@ -51,12 +52,14 @@ io.on("connection", async (socket) => {
           signal: signalData,
           from,
           name,
+          callType, // pass-through for UI
         });
       } catch (err) {
         console.error("Error in callUser event:", err);
       }
     });
 
+    // 2. Answer a call
     socket.on("answerCall", (data) => {
       try {
         const callerSocketId = getRecipientSocketId(data.to);
@@ -68,6 +71,8 @@ io.on("connection", async (socket) => {
         console.error("Error in answerCall event:", err);
       }
     });
+
+    // 3. End a call
     socket.on("endCall", ({ to }) => {
       try {
         const recipientSocketId = getRecipientSocketId(to);
@@ -78,6 +83,7 @@ io.on("connection", async (socket) => {
       }
     });
 
+    // Optional: join specific conversation room
     socket.on("joinConversationRoom", ({ conversationId }) => {
       if (conversationId) socket.join(String(conversationId));
     });
