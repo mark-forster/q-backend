@@ -16,6 +16,10 @@ const io = new Server(server, {
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
   },
+  transports: ["websocket", "polling"],
+  pingInterval: 20000,
+  pingTimeout: 25000,
+  connectionStateRecovery: { maxDisconnectionDuration: 2 * 60 * 1000 },
 });
 
 // helper
