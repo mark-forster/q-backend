@@ -1,4 +1,3 @@
-// socket/socket.js
 const { Server } = require("socket.io");
 const http = require("http");
 const express = require("express");
@@ -9,97 +8,113 @@ const Conversation = require("../models/conversation.model");
 
 // userId <-> socketId
 const userSocketMap = new Map();
+// 🚨 ပြင်ဆင်ချက်: socketId <-> userId (callRejected အတွက်)
+const socketToUserId = new Map();
 
 const io = new Server(server, {
-  cors: {
-    origin: config.cors.prodOrigins,
-    methods: ["GET", "POST", "PUT", "DELETE"],
-    credentials: true,
-  },
-  transports: ["websocket", "polling"],
-  pingInterval: 20000,
-  pingTimeout: 25000,
-  connectionStateRecovery: { maxDisconnectionDuration: 2 * 60 * 1000 },
+  cors: {
+    origin: config.cors.prodOrigins,
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true,
+  },
+  transports: ["websocket", "polling"],
+  pingInterval: 20000,
+  pingTimeout: 25000,
+  connectionStateRecovery: { maxDisconnectionDuration: 2 * 60 * 1000 },
 });
 
-// helper
 const getRecipientSocketId = (recipientId) => userSocketMap.get(String(recipientId));
 
 io.on("connection", async (socket) => {
-  const { userId } = socket.handshake.query || {};
-  if (!userId) return;
+  const { userId } = socket.handshake.query || {};
+  if (!userId) return;
 
-  // personal room for direct emits if needed
-  socket.join(userId);
+  socket.join(userId);
+  userSocketMap.set(String(userId), socket.id);
+  socketToUserId.set(socket.id, String(userId)); // 👈 socketToUserId map ကို အသုံးပြုရန်
+  io.emit("getOnlineUsers", Array.from(userSocketMap.keys()));
 
-  // track online users
-  userSocketMap.set(String(userId), socket.id);
-  io.emit("getOnlineUsers", Array.from(userSocketMap.keys()));
+  try {
+    const userConversations = await Conversation.find({ participants: userId }).select("_id");
+    userConversations.forEach(({ _id }) => socket.join(_id.toString()));
+// ========================= ZEGOCLOUD Call Signaling (Simplified) =========================
 
-  try {
-    // join all conversation rooms for this user
-    const userConversations = await Conversation.find({ participants: userId }).select("_id");
-    userConversations.forEach(({ _id }) => socket.join(_id.toString()));
+    // 1) Caller -> invite receiver
+    // payload from client: { userToCall, roomID, from, name, callType }
+    socket.on("callUser", ({ userToCall, roomID, from, name, callType }) => {
+      try {
+        const recipientSocketId = getRecipientSocketId(userToCall);
+        if (!recipientSocketId) {
+          return; 
+        }
+        
+        // Receiver UI အတွက် incomingCall
+        io.to(recipientSocketId).emit("incomingCall", {
+          from,
+          name,
+          callType,
+          // Zego အတွက် အရေးကြီးတဲ့ roomID ကို ပို့ပေးပါ
+          roomID, 
+        });
+      } catch (err) {
+        console.error("Error in callUser event:", err);
+        socket.emit("callFailed", { reason: "Internal error starting call." });
+      }
+    });
 
-    // -----------------------------------------------------------
-    // WebRTC Signaling Events
-    // -----------------------------------------------------------
+    // 2) Receiver -> accept (No SDP/ICE Signal needed, only confirmation)
+    // payload from client: { to }
+    socket.on("answerCall", ({ to }) => {
+      try {
+        const callerSocketId = getRecipientSocketId(to);
+        if (!callerSocketId) {
+          return;
+        }
+        // Caller UI အတွက် callAccepted 
+        io.to(callerSocketId).emit("callAccepted", {}); 
+      } catch (err) {
+        console.error("Error in answerCall event:", err);
+        socket.emit("callFailed", { reason: "Internal error accepting call." });
+      }
+    });
 
-    // 1. Call one-on-one
-    socket.on("callUser", ({ userToCall, signalData, from, name, callType }) => {
-      try {
-        const recipientSocketId = getRecipientSocketId(userToCall);
-        if (!recipientSocketId) {
-          return socket.emit("callFailed", { reason: "Recipient is not online." });
-        }
-        io.to(recipientSocketId).emit("incomingCall", {
-          signal: signalData,
-          from,
-          name,
-          callType, // pass-through for UI
-        });
-      } catch (err) {
-        console.error("Error in callUser event:", err);
-      }
-    });
+    // 3) Either side -> end 
+    socket.on("endCall", ({ to }) => {
+      try {
+        const recipientSocketId = getRecipientSocketId(to);
+        if (recipientSocketId) io.to(recipientSocketId).emit("callEnded");
+      } catch (err) {
+        console.error("Error in endCall event:", err);
+      }
+    });
 
-    // 2. Answer a call
-    socket.on("answerCall", (data) => {
-      try {
-        const callerSocketId = getRecipientSocketId(data.to);
-        if (!callerSocketId) {
-          return console.log("Caller socket not found.");
-        }
-        io.to(callerSocketId).emit("callAccepted", data.signal);
-      } catch (err) {
-        console.error("Error in answerCall event:", err);
-      }
-    });
+    // 🚨 NEW EVENT: Call Rejected logic
+    socket.on("callRejected", ({ to }) => {
+      try {
+        const callerSocketId = getRecipientSocketId(to);
+        if (callerSocketId) {
+          io.to(callerSocketId).emit("callRejected"); // Caller ဆီသို့ signal ပြန်ပို့ပါ
+          console.log(`[Socket] Call rejected by ${socketToUserId.get(socket.id)} to ${to}`);
+        }
+      } catch (err) {
+        console.error("Error in callRejected event:", err);
+      }
+    });
 
-    // 3. End a call
-    socket.on("endCall", ({ to }) => {
-      try {
-        const recipientSocketId = getRecipientSocketId(to);
-        if (!recipientSocketId) return;
-        io.to(recipientSocketId).emit("callEnded");
-      } catch (err) {
-        console.error("Error in endCall event:", err);
-      }
-    });
 
-    // Optional: join specific conversation room
-    socket.on("joinConversationRoom", ({ conversationId }) => {
-      if (conversationId) socket.join(String(conversationId));
-    });
+    socket.on("joinConversationRoom", ({ conversationId }) => {
+      if (conversationId) socket.join(String(conversationId));
+    });
 
-  } catch (err) {
-    console.error("Error joining conversation rooms or setting up socket listeners:", err);
-  }
+  } catch (err) {
+    console.error("Error setting up socket listeners:", err);
+  }
 
-  socket.on("disconnect", () => {
-    userSocketMap.delete(String(userId));
-    io.emit("getOnlineUsers", Array.from(userSocketMap.keys()));
-  });
+  socket.on("disconnect", () => {
+    userSocketMap.delete(String(userId));
+    socketToUserId.delete(socket.id);
+    io.emit("getOnlineUsers", Array.from(userSocketMap.keys()));
+  });
 });
 
 module.exports = { app, server, io, getRecipientSocketId, userSocketMap };

@@ -88,8 +88,6 @@ const verifyOtpAndRegister = catchAsync(async (req, res) => {
 });
 
 const getMe = catchAsync(async (req, res) => {
-  // isAuth middleware မှတဆင့် req.user တွင် လက်ရှိ user data ပါလာသည်
-  // password နဲ့ refreshToken ကို မပါအောင် select လုပ်ပြီး ပြန်ပေးနိုင်သည်
   const user = await User.findById(req.user._id).select("-password -refreshToken");
 
   if (!user) {
