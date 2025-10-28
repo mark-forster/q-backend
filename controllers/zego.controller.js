@@ -1,8 +1,8 @@
 const { generateToken04 } = require("../util/zegoServerAssistant"); // Correct path to your token generation utility
 
 
-const ZEGO_APP_ID = process.env.ZEGO_APP_ID || 1163922961; // Replace with your App ID config
-const ZEGO_SECRET = process.env.ZEGO_SERVER_SECRET || "ecf8eb72abc101846150cdf269c2ea7c"; // Replace with your App Secret config
+const ZEGO_APP_ID = process.env.ZEGO_APP_ID ; // Replace with your App ID config
+const ZEGO_SECRET = process.env.ZEGO_SERVER_SECRET; // Replace with your App Secret config
 
 const getZegoToken = async (req, res, next) => {
     // Client မှ ပို့လာသော roomID နှင့် userID ကို Body မှ ရယူပါ
