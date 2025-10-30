@@ -1,3 +1,5 @@
+// socket/socket.js
+
 const { Server } = require("socket.io");
 const http = require("http");
 const express = require("express");
@@ -45,6 +47,7 @@ io.on("connection", async (socket) => {
       try {
         const recipientSocketId = getRecipientSocketId(userToCall);
         if (!recipientSocketId) {
+          // You might want to emit a "callFailed" back to the caller here
           return; 
         }
         
@@ -79,16 +82,21 @@ io.on("connection", async (socket) => {
     });
 
     // 3) Either side -> end 
+    // This is triggered by the Zego UI's onLeaveRoom hook on the client (via handleEndCallLogic)
+    // payload from client: { to }
     socket.on("endCall", ({ to }) => {
       try {
         const recipientSocketId = getRecipientSocketId(to);
-        if (recipientSocketId) io.to(recipientSocketId).emit("callEnded");
+        if (recipientSocketId) {
+          // 🚨 IMPROVEMENT: Emit to the recipient to close their modal/UI
+          io.to(recipientSocketId).emit("callEnded"); 
+        }
       } catch (err) {
         console.error("Error in endCall event:", err);
       }
     });
 
-    // 🚨 NEW EVENT: Call Rejected logic
+    // 4) Call Rejected logic
     socket.on("callRejected", ({ to }) => {
       try {
         const callerSocketId = getRecipientSocketId(to);
