@@ -10,7 +10,6 @@ const Conversation = require("../models/conversation.model");
 
 // userId <-> socketId
 const userSocketMap = new Map();
-// 🚨 ပြင်ဆင်ချက်: socketId <-> userId (callRejected အတွက်)
 const socketToUserId = new Map();
 
 const io = new Server(server, {
@@ -33,7 +32,7 @@ io.on("connection", async (socket) => {
 
   socket.join(userId);
   userSocketMap.set(String(userId), socket.id);
-  socketToUserId.set(socket.id, String(userId)); // 👈 socketToUserId map ကို အသုံးပြုရန်
+  socketToUserId.set(socket.id, String(userId)); // 
   io.emit("getOnlineUsers", Array.from(userSocketMap.keys()));
 
   try {
@@ -51,12 +50,10 @@ io.on("connection", async (socket) => {
           return; 
         }
         
-        // Receiver UI အတွက် incomingCall
         io.to(recipientSocketId).emit("incomingCall", {
           from,
           name,
           callType,
-          // Zego အတွက် အရေးကြီးတဲ့ roomID ကို ပို့ပေးပါ
           roomID, 
         });
       } catch (err) {
@@ -73,7 +70,6 @@ io.on("connection", async (socket) => {
         if (!callerSocketId) {
           return;
         }
-        // Caller UI အတွက် callAccepted 
         io.to(callerSocketId).emit("callAccepted", {}); 
       } catch (err) {
         console.error("Error in answerCall event:", err);
@@ -101,7 +97,7 @@ io.on("connection", async (socket) => {
       try {
         const callerSocketId = getRecipientSocketId(to);
         if (callerSocketId) {
-          io.to(callerSocketId).emit("callRejected"); // Caller ဆီသို့ signal ပြန်ပို့ပါ
+          io.to(callerSocketId).emit("callRejected"); 
           console.log(`[Socket] Call rejected by ${socketToUserId.get(socket.id)} to ${to}`);
         }
       } catch (err) {
