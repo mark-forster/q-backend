@@ -72,7 +72,6 @@ const config = {
          'application/pdf','application/zip'],
   },
   zego: {
-    // 💡 required() function ကို အသုံးပြုပြီး .env မှာ မပါရင် error ပြမည်။
     appId: Number(required('ZEGO_APP_ID', process.env.ZEGO_APP_ID)),
     serverSecret: required('ZEGO_SERVER_SECRET', process.env.ZEGO_SERVER_SECRET),
   }

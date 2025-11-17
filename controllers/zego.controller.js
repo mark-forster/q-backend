@@ -1,44 +1,87 @@
-const { generateToken04 } = require("../util/zegoServerAssistant"); // Correct path to your token generation utility
+const { generateToken04 } = require("../util/zegoServerAssistant");
+const httpStatus = require("http-status");
 
+const ZEGO_APP_ID = Number(process.env.ZEGO_APP_ID);
+const ZEGO_SECRET = process.env.ZEGO_SERVER_SECRET;
 
-const ZEGO_APP_ID = process.env.ZEGO_APP_ID ; // Replace with your App ID config
-const ZEGO_SECRET = process.env.ZEGO_SERVER_SECRET; // Replace with your App Secret config
+// helper – stringify error format
+const errorResponse = (res, status, message) =>
+  res.status(status).json({ error: message });
 
 const getZegoToken = async (req, res, next) => {
-    const { roomID, userID } = req.body; 
+  try {
+    const { roomID, userID } = req.body;
 
-    // Server-side validation
-    if (!roomID || !userID) {
-        return res.status(400).json({ error: "roomID and userID are required in the request body." });
-    }
+    // 1) basic validation
+    if (!roomID || !userID) {
+      return errorResponse(
+        res,
+        httpStatus.BAD_REQUEST,
+        "roomID and userID are required."
+      );
+    }
 
-    try {
-        const appId = Number(ZEGO_APP_ID);
-        const secret = ZEGO_SECRET;
-        const effectiveTimeInSeconds = 3600;
+    if (typeof roomID !== "string" || typeof userID !== "string") {
+      return errorResponse(
+        res,
+        httpStatus.BAD_REQUEST,
+        "roomID and userID must be strings."
+      );
+    }
 
-        const token = generateToken04(
-            appId,
-            userID, 
-            secret,
-            effectiveTimeInSeconds,
-            JSON.stringify({ roomID: roomID }) 
-        );
+    // 2) length + simple sanitization
+    if (roomID.length > 128 || userID.length > 64) {
+      return errorResponse(
+        res,
+        httpStatus.BAD_REQUEST,
+        "roomID or userID too long."
+      );
+    }
 
-        res.status(200).json({
-            token: token, //
-            roomID: roomID,
-            userID: userID
-        });
+    // 3) auth user must match userID (Token Hardening – မိမိကိုယ် userID နဲ့ပဲ token ယူလို့ရမယ်)
+    const authUserId = String(req.user?.id || req.user?._id || "");
+    if (authUserId && authUserId !== String(userID)) {
+      return errorResponse(
+        res,
+        httpStatus.FORBIDDEN,
+        "You can only request token for your own user."
+      );
+    }
 
-    } catch (error) {
-        console.error("Zego Token Generation Error:", error);
-        res.status(500).json({ 
-            error: "Failed to generate Zego Token.",
-            details: error.message 
-        });
-    }
+    if (!ZEGO_APP_ID || !ZEGO_SECRET || ZEGO_SECRET.length !== 32) {
+      return errorResponse(
+        res,
+        httpStatus.INTERNAL_SERVER_ERROR,
+        "Zego credential not configured properly."
+      );
+    }
+
+    const effectiveTimeInSeconds = 3600; // 1 hr – production-safe upper bound
+
+    const payload = JSON.stringify({ roomID });
+
+    const token = generateToken04(
+      ZEGO_APP_ID,
+      userID,
+      ZEGO_SECRET,
+      effectiveTimeInSeconds,
+      payload
+    );
+
+    return res.status(httpStatus.OK).json({
+      token,
+      roomID,
+      userID,
+      expireIn: effectiveTimeInSeconds,
+    });
+  } catch (error) {
+    console.error("Zego Token Generation Error:", error);
+    return errorResponse(
+      res,
+      httpStatus.INTERNAL_SERVER_ERROR,
+      "Failed to generate Zego Token."
+    );
+  }
 };
-
 
 module.exports = { getZegoToken };
