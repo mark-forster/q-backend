@@ -1,28 +1,83 @@
+// models/conversation.model.js
 const mongoose = require("mongoose");
 
-const lastMessageSchema = new mongoose.Schema({
-  text: String,
-  sender: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-  seenBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
-  // 💡 Note: Add _id to lastMessageSchema for proper indexing and tracking
-  _id: { type: mongoose.Schema.Types.ObjectId, ref: "Message" },
-}, { _id: false, timestamps: true });
-
-const conversationSchema = new mongoose.Schema({
-  isGroup: { type: Boolean, default: false },
-  name: {
-    type: String,
-    required: function () { return this.isGroup; }
+// ✅ callInfo subdocument (for lastMessage preview in conversation list)
+const lastCallInfoSchema = new mongoose.Schema(
+  {
+    status: {
+      type: String,
+      enum: [
+        "outgoing",
+        "incoming",
+        "missed",
+        "declined",
+        "completed",
+        "timeout",
+        "canceled",
+      ],
+    },
+    callType: {
+      type: String,
+      enum: ["audio", "video"],
+      default: "audio",
+    },
+    duration: { type: Number, default: 0 },
   },
-  participants: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", required: true }],
-  lastMessage: lastMessageSchema,
-  // This array will track which users have deleted the conversation.
-  deletedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
-}, { timestamps: true });
+  { _id: false }
+);
 
+const lastMessageSchema = new mongoose.Schema(
+  {
+    text: String,
+    sender: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    seenBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
 
+    // message id of last message
+    _id: { type: mongoose.Schema.Types.ObjectId, ref: "Message" },
+
+    // ✅ NEW: callInfo for call preview in sidebar
+    callInfo: {
+      type: lastCallInfoSchema,
+      default: null,
+    },
+  },
+  {
+    _id: false,
+    timestamps: true, // createdAt / updatedAt for lastMessage
+  }
+);
+
+const conversationSchema = new mongoose.Schema(
+  {
+    isGroup: { type: Boolean, default: false },
+
+    // Group name (required only when isGroup = true)
+    name: {
+      type: String,
+      required: function () {
+        return this.isGroup;
+      },
+    },
+
+    // Participants (for both single & group)
+    participants: [
+      { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    ],
+
+    // ✅ Optional: Group admins (for advanced permissions)
+    admins: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+
+    // Last message preview
+    lastMessage: lastMessageSchema,
+
+    // Soft delete: who deleted this conversation
+    deletedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+  },
+  { timestamps: true }
+);
+
+// Indexes for faster queries
 conversationSchema.index({ participants: 1 });
-conversationSchema.index({ 'lastMessage.updatedAt': -1 });
-
+conversationSchema.index({ "lastMessage.updatedAt": -1 });
 
 module.exports = mongoose.model("Conversation", conversationSchema);

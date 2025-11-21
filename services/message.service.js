@@ -1,11 +1,13 @@
 // services/message.service.js
 const Message = require("../models/message.model");
 const Conversation = require("../models/conversation.model");
-const { io, getRecipientSocketId } = require("../socket/socket");
+const { io, getRecipientSocketIds } = require("../socket/socket");
 const cloudinary = require("cloudinary").v2;
 const fs = require("fs");
 
-// ---- groups ----
+// -----------------------------
+// Group Chat Helpers
+// -----------------------------
 const createGroupChat = async ({ name, participants, creatorId }) => {
   try {
     const conversation = new Conversation({
@@ -34,163 +36,222 @@ const findConversation = async (userId, otherUserId) => {
   }
 };
 
-// ---- send message + attachments ----
-const sendMessage = async ({ recipientId, conversationId, message, senderId, files }) => {
-  try {
-    let conversation = await Conversation.findOne({
-      participants: { $all: [senderId, recipientId] },
-    }).populate({ path: "participants", select: "username profilePic name updatedAt" });
+// -----------------------------
+// Helper: Upload Attachments
+// -----------------------------
+async function uploadAttachments(files = []) {
+  if (!files.length) return [];
 
-    if (conversation && conversation.deletedBy?.includes(senderId)) {
+  const uploads = files.map(async (file) => {
+    const mimeType = file.mimetype || "";
+    const uploadOptions = {
+      secure: true,
+      resource_type: "auto",
+      type: "upload",
+    };
+
+    let attachmentType = "file";
+
+    if (mimeType.startsWith("image/")) {
+      attachmentType = mimeType === "image/gif" ? "gif" : "image";
+      uploadOptions.resource_type = "image";
+      uploadOptions.type = "upload"; // public
+    } else if (mimeType.startsWith("video/")) {
+      attachmentType = "video";
+      uploadOptions.resource_type = "video";
+      uploadOptions.type = "authenticated";
+    } else if (mimeType.startsWith("audio/")) {
+      attachmentType = "audio";
+      uploadOptions.resource_type = "video"; // Cloudinary uses video for audio too
+      uploadOptions.type = "authenticated";
+    } else {
+      attachmentType = "file";
+      uploadOptions.resource_type = "raw";
+      uploadOptions.type = "authenticated";
+    }
+
+    const uploaded = await cloudinary.uploader.upload(file.path, uploadOptions);
+    if (fs.existsSync(file.path)) {
+      fs.unlinkSync(file.path);
+    }
+
+    const isPublicImage =
+      (attachmentType === "image" || attachmentType === "gif") &&
+      uploadOptions.type !== "authenticated";
+
+    return {
+      type: attachmentType,
+      url: isPublicImage ? uploaded.secure_url : null,
+      public_id: uploaded.public_id,
+      name: file.originalname || null,
+      size: file.size || null,
+      width: uploaded.width || null,
+      height: uploaded.height || null,
+      duration: uploaded.duration || null,
+      format: uploaded.format || null,
+      resource_type: uploaded.resource_type || null,
+      cloudinary_type: uploadOptions.type || null,
+      mimeType,
+    };
+  });
+
+  return Promise.all(uploads);
+}
+
+// Helper: build lastMessage text
+function resolveLastMessageText(messageText, attachments = []) {
+  if (messageText && messageText.trim()) return messageText.trim();
+  if (!attachments.length) return "";
+
+  const t = attachments.at(-1)?.type;
+  if (t === "image") return "Image";
+  if (t === "gif") return "GIF";
+  if (t === "video") return "Video";
+  if (t === "audio") return "Audio";
+  return "File";
+}
+
+// Helper: emit to all socketIds of a user
+function emitToUser(userId, event, payload) {
+  const sockets = getRecipientSocketIds(userId);
+  if (!sockets || !sockets.length) return;
+  sockets.forEach((sid) => {
+    io.to(sid).emit(event, payload);
+  });
+}
+
+// -----------------------------
+// SEND MESSAGE
+// -----------------------------
+const sendMessage = async ({
+  recipientId,
+  conversationId,
+  message,
+  senderId,
+  files,
+}) => {
+  try {
+    let conversation = null;
+    const sender = String(senderId);
+    const receiver = String(recipientId);
+
+    // 1) Try to use provided conversationId (if any)
+    if (conversationId) {
+      conversation = await Conversation.findById(conversationId).populate(
+        "participants",
+        "username profilePic name updatedAt"
+      );
+    }
+
+    // 2) Fallback: find by participants
+    if (!conversation) {
+      conversation = await Conversation.findOne({
+        isGroup: false,
+        participants: { $all: [sender, receiver] },
+      }).populate("participants", "username profilePic name updatedAt");
+    }
+
+    // 3) If conversation previously deleted by sender → remove from deletedBy
+    if (conversation && conversation.deletedBy?.includes(sender)) {
       conversation.deletedBy = conversation.deletedBy.filter(
-        (id) => id.toString() !== senderId.toString()
+        (id) => id.toString() !== sender
       );
       await conversation.save();
     }
 
     const isNewConversation = !conversation;
 
-    if (isNewConversation) {
+    // 4) Create new conversation if needed
+    if (!conversation) {
       conversation = await Conversation.create({
         isGroup: false,
-        participants: [senderId, recipientId],
+        participants: [sender, receiver],
       });
-      conversation = await conversation.populate({
-        path: "participants",
-        select: "username profilePic name updatedAt",
-      });
+      conversation = await conversation.populate(
+        "participants",
+        "username profilePic name updatedAt"
+      );
     }
 
-    // upload attachments (Cloudinary)
-    let attachments = [];
-    if (files?.length) {
-      const uploadPromises = files.map(async (file) => {
-        const mimeType = file.mimetype || "";
-        const uploadOptions = { secure: true, type: "upload", resource_type: "auto" };
-        let attachmentType;
+    // 5) Upload attachments to Cloudinary
+    const attachments = await uploadAttachments(files);
 
-        if (mimeType.startsWith("image/")) {
-          attachmentType = mimeType === "image/gif" ? "gif" : "image";
-          uploadOptions.resource_type = "image";
-          uploadOptions.type = "upload";
-        } else if (mimeType.startsWith("video/")) {
-          attachmentType = "video";
-          uploadOptions.resource_type = "video";
-          uploadOptions.type = "authenticated";
-        } else if (mimeType.startsWith("audio/")) {
-          attachmentType = "audio";
-          uploadOptions.resource_type = "video";
-          uploadOptions.type = "authenticated";
-        } else {
-          attachmentType = "file";
-          uploadOptions.resource_type = "raw";
-          uploadOptions.type = "authenticated";
-        }
-
-        const uploaded = await cloudinary.uploader.upload(file.path, uploadOptions);
-        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
-
-        const isPublicImage =
-          (attachmentType === "image" || attachmentType === "gif") &&
-          uploadOptions.type !== "authenticated";
-
-        return {
-          type: attachmentType,
-          url: isPublicImage ? uploaded.secure_url : null,
-          public_id: uploaded.public_id,
-          name: file.originalname || null,
-          size: file.size || null,
-          width: uploaded.width || null,
-          height: uploaded.height || null,
-          duration: uploaded.duration || null,
-          format: uploaded.format || null,
-          resource_type: uploaded.resource_type || null,
-          cloudinary_type: uploadOptions.type || null,
-          mimeType,
-        };
-      });
-
-      attachments = await Promise.all(uploadPromises);
-    }
-
+    // 6) Create message
     const newMessage = await Message.create({
       conversationId: conversation._id,
-      sender: senderId,
+      sender: sender,
       text: message || "",
       attachments,
-      seenBy: [senderId],
+      seenBy: [sender],
     });
 
-    // compute lastMessage text
-    let lastText = message || "";
-    if (!lastText && attachments.length > 0) {
-      const t = attachments.at(-1).type;
-      lastText = t === "image" ? "Image" : t === "gif" ? "GIF" : t === "video" ? "Video" : t === "audio" ? "Audio" : "File";
-    }
+    // 7) Update conversation.lastMessage
+    const lastText = resolveLastMessageText(message, attachments);
 
     conversation.lastMessage = {
       text: lastText,
-      sender: senderId,
-      seenBy: [senderId],
+      sender: sender,
+      seenBy: [sender],
       updatedAt: new Date(),
     };
     await conversation.save();
 
-    if (io) {
-            // FIX: Emit only to the recipient, not the whole conversation room.
-            const recipientSocketId = getRecipientSocketId(recipientId);
-            if (recipientSocketId) {
-                io.to(recipientSocketId).emit("newMessage", newMessage);
-            }
+    // 8) Emit socket events
+    // - emit ONLY to receiver for "newMessage"
+    emitToUser(receiver, "newMessage", newMessage);
 
-            if (isNewConversation) {
-                const recipient = conversation.participants.find(
-                    (p) => p._id.toString() !== senderId.toString()
-                );
-                if (recipient) {
-                    const recipientSocketIdForConv = getRecipientSocketId(recipient._id.toString());
-                    if (recipientSocketIdForConv) {
-                         io.to(recipientSocketIdForConv).emit("conversationCreated", conversation);
-                    }
-                }
-            }
-        }
+    // - if this is a brand new conversation, notify both sides
+    if (isNewConversation) {
+      const convPayload = conversation.toObject();
 
-        return newMessage;
+      emitToUser(receiver, "conversationCreated", convPayload);
+      emitToUser(sender, "conversationCreated", convPayload);
+    }
+
+    return newMessage;
   } catch (err) {
     console.error("Send Message Error:", err);
     if (files?.length) {
       for (const f of files) {
-        try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {}
+        try {
+          if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
+        } catch {}
       }
     }
     throw err;
   }
 };
 
-// ---- get messages ----
+// -----------------------------
+// GET MESSAGES
+// -----------------------------
 const getMessages = async ({ conversationId, userId }) => {
   try {
     const messages = await Message.find({
       conversationId,
       deletedBy: { $ne: userId },
     }).sort({ createdAt: 1 });
-  return messages;
+
+    return messages;
   } catch (error) {
     console.error("Get Messages Error:", error);
     throw error;
   }
 };
 
-// ---- get conversations (with unreadCount) ----
+// -----------------------------
+// GET CONVERSATIONS (with unreadCount)
+// -----------------------------
 const getConversations = async (userId) => {
   try {
     const conversations = await Conversation.find({
       participants: userId,
       deletedBy: { $ne: userId },
-    }).populate({ path: "participants", select: "username profilePic name updatedAt" });
+    }).populate(
+      "participants",
+      "username profilePic name updatedAt"
+    );
 
-    // attach unreadCount without changing schema
     const withUnread = await Promise.all(
       conversations.map(async (conv) => {
         const unreadCount = await Message.countDocuments({
@@ -198,9 +259,11 @@ const getConversations = async (userId) => {
           deletedBy: { $ne: userId },
           seenBy: { $ne: userId },
         });
+
         const doc = conv.toObject();
         doc.unreadCount = unreadCount;
-        // keep non-group participants list filtered for UX consistency
+
+        // direct chat ဖြစ်ရင် – UI အတွက် opposite user တစ်ယောက်ထဲ ပြန်ပေးမယ်
         if (!doc.isGroup) {
           doc.participants = doc.participants.filter(
             (p) => p._id.toString() !== userId.toString()
@@ -212,14 +275,21 @@ const getConversations = async (userId) => {
 
     return withUnread;
   } catch (err) {
-    return err.message;
+    console.error("GetConversations Error:", err);
+    throw err;
   }
 };
 
-// ---- rename / group ops ----
+// -----------------------------
+// Group ops
+// -----------------------------
 const renameGroup = async ({ conversationId, name }) => {
   try {
-    const updated = await Conversation.findByIdAndUpdate(conversationId, { name }, { new: true });
+    const updated = await Conversation.findByIdAndUpdate(
+      conversationId,
+      { name },
+      { new: true }
+    );
     return updated;
   } catch (error) {
     console.error("Rename Group Error:", error);
@@ -231,6 +301,7 @@ const addToGroup = async ({ conversationId, userId }) => {
   try {
     const conversation = await Conversation.findById(conversationId);
     if (!conversation || !conversation.isGroup) return null;
+
     if (!conversation.participants.includes(userId)) {
       conversation.participants.push(userId);
       await conversation.save();
@@ -246,7 +317,10 @@ const removeFromGroup = async ({ conversationId, userId }) => {
   try {
     const conversation = await Conversation.findById(conversationId);
     if (!conversation || !conversation.isGroup) return null;
-    conversation.participants = conversation.participants.filter((id) => id.toString() !== userId);
+
+    conversation.participants = conversation.participants.filter(
+      (id) => id.toString() !== String(userId)
+    );
     await conversation.save();
     return conversation;
   } catch (error) {
@@ -255,15 +329,19 @@ const removeFromGroup = async ({ conversationId, userId }) => {
   }
 };
 
-// ---- delete message / conversation, update message, forward, delete-for-me, seen ----
+// -----------------------------
+// DELETE MESSAGE (for everyone)
+// -----------------------------
 const deleteMessage = async ({ messageId, currentUserId }) => {
   try {
     const message = await Message.findById(messageId);
     if (!message) return null;
-    if (message.sender.toString() !== currentUserId.toString()) {
+
+    if (message.sender.toString() !== String(currentUserId)) {
       throw new Error("You are not authorized to delete this message.");
     }
 
+    // cloudinary cleanup
     if (message.attachments?.length) {
       await Promise.all(
         message.attachments.map(async (attachment) => {
@@ -271,6 +349,7 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
             "attachments.public_id": attachment.public_id,
             _id: { $ne: messageId },
           });
+
           if (otherCount === 0) {
             try {
               await cloudinary.uploader.destroy(attachment.public_id, {
@@ -278,7 +357,11 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
                 type: attachment.cloudinary_type,
               });
             } catch (e) {
-              console.error("Cloudinary delete failed:", attachment.public_id, e?.message);
+              console.error(
+                "Cloudinary delete failed:",
+                attachment.public_id,
+                e?.message
+              );
             }
           }
         })
@@ -287,35 +370,53 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
 
     const conversationId = message.conversationId;
     const deletedMessageId = message._id;
+
     await Message.findByIdAndDelete(messageId);
 
     const conversation = await Conversation.findById(conversationId);
-    if (
-      conversation &&
-      conversation.lastMessage?.sender?.toString() === message.sender.toString() &&
-      conversation.lastMessage?.text === message.text
-    ) {
-      const lastMessage = await Message.findOne({ conversationId }).sort({ createdAt: -1 });
-      conversation.lastMessage = lastMessage
-        ? { text: lastMessage.text, sender: lastMessage.sender, seenBy: lastMessage.seenBy, updatedAt: lastMessage.updatedAt }
-        : {};
-      await conversation.save();
-    }
-
     if (conversation) {
-      io.to(conversation._id.toString()).emit("messageDeleted", {
-        conversationId: conversationId.toString(),
-        messageId: deletedMessageId.toString(),
+      // re-compute lastMessage
+      const lastMessage = await Message.findOne({
+        conversationId,
+        deletedBy: { $ne: currentUserId },
+      }).sort({ createdAt: -1 });
+
+      if (lastMessage) {
+        conversation.lastMessage = {
+          text: resolveLastMessageText(
+            lastMessage.text,
+            lastMessage.attachments || []
+          ),
+          sender: lastMessage.sender,
+          seenBy: lastMessage.seenBy,
+          updatedAt: lastMessage.updatedAt,
+        };
+      } else {
+        conversation.lastMessage = undefined;
+      }
+      await conversation.save();
+
+      // notify all participants in this conversation room
+      io.to(String(conversationId)).emit("messageDeleted", {
+        conversationId: String(conversationId),
+        messageId: String(deletedMessageId),
       });
     }
 
-    return { deletedMessageId, conversationId, participants: conversation?.participants };
+    return {
+      deletedMessageId,
+      conversationId,
+      participants: conversation?.participants,
+    };
   } catch (error) {
     console.error("Delete Message Error:", error);
     throw error;
   }
 };
 
+// -----------------------------
+// DELETE CONVERSATION
+// -----------------------------
 const deleteConversation = async ({ conversationId, currentUserId }) => {
   try {
     const conversation = await Conversation.findByIdAndUpdate(
@@ -323,16 +424,21 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
       { $addToSet: { deletedBy: currentUserId } },
       { new: true }
     );
+
     if (!conversation) throw new Error("Conversation not found.");
 
-    await Message.updateMany({ conversationId }, { $addToSet: { deletedBy: currentUserId } });
+    await Message.updateMany(
+      { conversationId },
+      { $addToSet: { deletedBy: currentUserId } }
+    );
 
     const totalParticipants = conversation.participants.length;
     const deletedByCount = conversation.deletedBy.length;
 
     if (totalParticipants > 0 && totalParticipants === deletedByCount) {
-      // purge all
+      // all participants deleted → purge completely
       const messages = await Message.find({ conversationId });
+
       for (const message of messages) {
         if (message.attachments?.length) {
           for (const attachment of message.attachments) {
@@ -340,6 +446,7 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
               "attachments.public_id": attachment.public_id,
               conversationId: { $ne: conversationId },
             });
+
             if (!referencedElsewhere) {
               try {
                 await cloudinary.uploader.destroy(attachment.public_id, {
@@ -347,44 +454,78 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
                   type: attachment.cloudinary_type,
                 });
               } catch (e) {
-                console.error("Cloudinary delete failed:", e?.message);
+                console.error(
+                  "Cloudinary delete failed:",
+                  e?.message
+                );
               }
             }
           }
         }
       }
+
       await Message.deleteMany({ conversationId });
       await Conversation.findByIdAndDelete(conversationId);
-      io.to(conversationId.toString()).emit("conversationPermanentlyDeleted", { conversationId: conversationId.toString() });
-      return { permanentlyDeleted: true, conversationId: conversationId.toString() };
+
+      io.to(String(conversationId)).emit(
+        "conversationPermanentlyDeleted",
+        { conversationId: String(conversationId) }
+      );
+
+      return {
+        permanentlyDeleted: true,
+        conversationId: String(conversationId),
+      };
     }
 
-    return { permanentlyDeleted: false, conversationId: conversationId.toString() };
+    return {
+      permanentlyDeleted: false,
+      conversationId: String(conversationId),
+    };
   } catch (error) {
     console.error("Delete Conversation Error:", error);
     throw error;
   }
 };
 
+// -----------------------------
+// UPDATE MESSAGE (edit)
+// -----------------------------
 const updateMessage = async ({ messageId, newText, currentUserId }) => {
   try {
     const message = await Message.findById(messageId);
     if (!message) throw new Error("Message not found.");
-    if (message.sender.toString() !== currentUserId.toString())
+
+    if (message.sender.toString() !== String(currentUserId)) {
       throw new Error("You are not authorized to update this message.");
+    }
 
     message.text = newText;
     await message.save();
 
-    const conversation = await Conversation.findById(message.conversationId);
-    if (conversation && conversation.lastMessage?.text === message.text) {
-      conversation.lastMessage.text = newText;
-      await conversation.save();
+    // update conversation.lastMessage if this is latest message
+    const conversationId = message.conversationId;
+    const latest = await Message.findOne({ conversationId }).sort({
+      createdAt: -1,
+    });
+
+    if (latest && String(latest._id) === String(messageId)) {
+      await Conversation.findByIdAndUpdate(conversationId, {
+        $set: {
+          "lastMessage.text": resolveLastMessageText(
+            newText,
+            message.attachments || []
+          ),
+          "lastMessage.sender": message.sender,
+          "lastMessage.updatedAt": new Date(),
+        },
+      });
     }
 
-    io.to(message.conversationId.toString()).emit("messageUpdated", {
-      conversationId: message.conversationId.toString(),
-      messageId: message._id.toString(),
+    // send socket event for that conversation room
+    io.to(String(conversationId)).emit("messageUpdated", {
+      conversationId: String(conversationId),
+      messageId: String(messageId),
       newText,
     });
 
@@ -395,58 +536,75 @@ const updateMessage = async ({ messageId, newText, currentUserId }) => {
   }
 };
 
-const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
+// -----------------------------
+// FORWARD MESSAGE
+// -----------------------------
+const forwardMessage = async ({
+  currentUserId,
+  messageId,
+  recipientIds,
+}) => {
   try {
     const originalMessage = await Message.findById(messageId);
     if (!originalMessage) throw new Error("Original message not found");
 
     const forwarded = [];
 
-    for (const recipientId of recipientIds) {
+    for (const rid of recipientIds) {
+      const recipientId = String(rid);
+      const senderId = String(currentUserId);
+
       let conversation = await Conversation.findOne({
-        participants: { $all: [currentUserId, recipientId] },
-      }).populate({ path: "participants", select: "username profilePic name" });
+        isGroup: false,
+        participants: { $all: [senderId, recipientId] },
+      }).populate("participants", "username profilePic name");
 
       const isNew = !conversation;
-      if (isNew) {
+
+      if (!conversation) {
         conversation = await Conversation.create({
           isGroup: false,
-          participants: [currentUserId, recipientId],
+          participants: [senderId, recipientId],
         });
-        conversation = await conversation.populate("participants", "username name profilePic");
+        conversation = await conversation.populate(
+          "participants",
+          "username name profilePic"
+        );
       }
 
-      const newMessage = await Message.create({
-        sender: currentUserId,
+      const newMsg = await Message.create({
+        sender: senderId,
         conversationId: conversation._id,
         text: originalMessage.text,
         attachments: originalMessage.attachments || [],
-        seenBy: [currentUserId],
+        seenBy: [senderId],
         isForwarded: true,
       });
 
-      let lastText = originalMessage.text || "";
-      if (!lastText && originalMessage.attachments?.length) {
-        const t = originalMessage.attachments[0].type;
-        lastText = t === "image" ? "Image" : "File";
-      }
-      conversation.lastMessage = { text: lastText, sender: currentUserId, seenBy: [currentUserId], updatedAt: new Date() };
+      const lastText = resolveLastMessageText(
+        originalMessage.text,
+        originalMessage.attachments || []
+      );
+      conversation.lastMessage = {
+        text: lastText,
+        sender: senderId,
+        seenBy: [senderId],
+        updatedAt: new Date(),
+      };
       await conversation.save();
 
-      const populated = await newMessage.populate("sender", "username profilePic");
-      forwarded.push(populated);
+      forwarded.push(newMsg);
 
-      const senderSocketId = getRecipientSocketId(currentUserId);
-      const recipientSocketId = getRecipientSocketId(recipientId);
+      // notify participants
+      if (isNew) {
+        const convObj = conversation.toObject();
+        emitToUser(recipientId, "conversationCreated", convObj);
+        emitToUser(senderId, "conversationCreated", convObj);
+      }
 
-      if (recipientSocketId) {
-        if (isNew) io.to(recipientSocketId).emit("conversationCreated", conversation);
-        io.to(recipientSocketId).emit("newMessage", populated);
-      }
-      if (senderSocketId) {
-        if (isNew) io.to(senderSocketId).emit("conversationCreated", conversation);
-        io.to(senderSocketId).emit("newMessage", populated);
-      }
+      emitToUser(recipientId, "newMessage", newMsg);
+      // sender UI ကို HTTP response နဲ့ handle လုပ်နေပြီ ဆိုရင်
+      // 여기서 emitToUser(senderId, "newMessage", newMsg) မလိုပါ
     }
 
     return forwarded;
@@ -456,6 +614,9 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
   }
 };
 
+// -----------------------------
+// DELETE MESSAGE FOR ME
+// -----------------------------
 const deleteMessageForMe = async ({ messageId, currentUserId }) => {
   try {
     const message = await Message.findByIdAndUpdate(
@@ -465,8 +626,12 @@ const deleteMessageForMe = async ({ messageId, currentUserId }) => {
     );
     if (!message) throw new Error("Message not found or update failed.");
 
-    const conversation = await Conversation.findById(message.conversationId);
-    if (!conversation) return { messageId, permanentlyDeleted: false };
+    const conversation = await Conversation.findById(
+      message.conversationId
+    );
+    if (!conversation) {
+      return { messageId, permanentlyDeleted: false };
+    }
 
     const totalParticipants = conversation.participants.length;
     const deletedByCount = message.deletedBy.length;
@@ -476,7 +641,9 @@ const deleteMessageForMe = async ({ messageId, currentUserId }) => {
 
       if (message.attachments?.length) {
         for (const attachment of message.attachments) {
-          const stillExists = await Message.exists({ "attachments.public_id": attachment.public_id });
+          const stillExists = await Message.exists({
+            "attachments.public_id": attachment.public_id,
+          });
           if (!stillExists) {
             try {
               await cloudinary.uploader.destroy(attachment.public_id, {
@@ -484,11 +651,15 @@ const deleteMessageForMe = async ({ messageId, currentUserId }) => {
                 type: attachment.cloudinary_type,
               });
             } catch (e) {
-              console.error("Cloudinary delete failed:", e?.message);
+              console.error(
+                "Cloudinary delete failed:",
+                e?.message
+              );
             }
           }
         }
       }
+
       return { messageId, permanentlyDeleted: true };
     }
 
@@ -499,31 +670,34 @@ const deleteMessageForMe = async ({ messageId, currentUserId }) => {
   }
 };
 
+// -----------------------------
+// UPDATE MESSAGES SEEN STATUS
+// -----------------------------
 const updateMessagesSeenStatus = async ({ conversationId, userId }) => {
   try {
-    // 1) mark all msgs in the room as seen by this user
+    const cid = String(conversationId);
+    const uid = String(userId);
+
     await Message.updateMany(
-      { conversationId, seenBy: { $ne: userId } },
-      { $addToSet: { seenBy: userId } }
+      { conversationId: cid, seenBy: { $ne: uid } },
+      { $addToSet: { seenBy: uid } }
     );
 
-    // 2) update conversation.lastMessage metadata
-    const conv = await Conversation.findById(conversationId).select("lastMessage");
+    const conv = await Conversation.findById(cid).select("lastMessage");
     if (conv && conv.lastMessage) {
       await Conversation.findByIdAndUpdate(
-        conversationId,
+        cid,
         {
-          $addToSet: { "lastMessage.seenBy": userId },   // array -> OK
-          $set: { "lastMessage.updatedAt": new Date() }, // date -> use $set
+          $addToSet: { "lastMessage.seenBy": uid },
+          $set: { "lastMessage.updatedAt": new Date() },
         },
         { new: true }
       );
     }
 
-    // 3) notify clients
-    io.to(String(conversationId)).emit("messagesSeen", {
-      conversationId: String(conversationId),
-      userId: String(userId),
+    io.to(cid).emit("messagesSeen", {
+      conversationId: cid,
+      userId: uid,
     });
 
     return { ok: true };
@@ -532,7 +706,6 @@ const updateMessagesSeenStatus = async ({ conversationId, userId }) => {
     throw error;
   }
 };
-
 
 module.exports = {
   sendMessage,

@@ -1,3 +1,4 @@
+// socket.js
 const { Server } = require("socket.io");
 const http = require("http");
 const express = require("express");
@@ -9,254 +10,167 @@ const server = http.createServer(app);
 const { config } = require("../config");
 const Conversation = require("../models/conversation.model");
 const CallLog = require("../models/callLog.model");
+const { createCallMessage } = require("../helpers/createCallMessage");
 
 const JWT_SECRET = config.jwt?.secret || process.env.JWT_SECRET;
 
-// userId -> Set<socketId> (multi-device)
+// USER SOCKET STORAGE
+// userId -> Set(socketIds)
 const userSocketMap = new Map();
 // socketId -> userId
 const socketToUserId = new Map();
 
-// userId -> "idle" | "ringing" | "in-call"
-const userCallState = new Map();
-
-// roomID -> { caller, receiver, callType, status, startedAt }
+// roomID -> call info
 const activeCalls = new Map();
-
-// roomID -> timeoutId (call timeout)
+// roomID -> timeoutRef
 const callTimeoutMap = new Map();
 
-// rate limit: userId -> [timestamp,...]
-const callRateMap = new Map();
+const CALL_TIMEOUT_MS = 30000;
 
-// constants
-const CALL_TIMEOUT_MS = 30_000; // 30 sec
-const MAX_CALLS_PER_WINDOW = 5;
-const RATE_WINDOW_MS = 30_000; // 30 sec
+// Exportable for message.service.js
+function getRecipientSocketIds(userId) {
+  const set = userSocketMap.get(String(userId));
+  return set ? [...set] : [];
+}
 
 const io = new Server(server, {
   cors: {
-    origin: config.cors.prodOrigins,
-    methods: ["GET", "POST", "PUT", "DELETE"],
+    origin: config.cors?.prodOrigins || "*",
+    methods: ["GET", "POST"],
     credentials: true,
   },
   transports: ["websocket", "polling"],
-  pingInterval: 20000,
-  pingTimeout: 25000,
-  connectionStateRecovery: { maxDisconnectionDuration: 2 * 60 * 1000 },
 });
 
-const getRecipientSocketId = (recipientId) => {
-  const set = userSocketMap.get(String(recipientId));
-  if (!set) return null;
-  // default – first device only (backward compatible)
-  return [...set][0];
-};
+// -------------------------
+// Helpers
+// -------------------------
+function setUserSocket(userId, socketId) {
+  const id = String(userId);
+  const set = userSocketMap.get(id) || new Set();
+  set.add(socketId);
+  userSocketMap.set(id, set);
+  socketToUserId.set(socketId, id);
+}
 
-const getAllRecipientSockets = (recipientId) => {
-  const set = userSocketMap.get(String(recipientId));
-  return set ? [...set] : [];
-};
+function removeUserSocket(socketId) {
+  const uid = socketToUserId.get(socketId);
+  if (!uid) return;
 
-const setUserSocket = (userId, socketId) => {
-  const key = String(userId);
-  const existing = userSocketMap.get(key) || new Set();
-  existing.add(socketId);
-  userSocketMap.set(key, existing);
-  socketToUserId.set(socketId, key);
-};
-
-const removeUserSocket = (socketId) => {
-  const userId = socketToUserId.get(socketId);
-  if (!userId) return;
-  const set = userSocketMap.get(userId);
+  const set = userSocketMap.get(uid);
   if (set) {
     set.delete(socketId);
-    if (set.size === 0) userSocketMap.delete(userId);
+    if (set.size === 0) userSocketMap.delete(uid);
   }
   socketToUserId.delete(socketId);
-};
+}
 
-// rate-limit helper
-const isRateLimited = (userId) => {
-  const now = Date.now();
-  const key = String(userId);
-  const attempts = callRateMap.get(key) || [];
-
-  // remove old attempts
-  const fresh = attempts.filter((ts) => now - ts < RATE_WINDOW_MS);
-  fresh.push(now);
-
-  callRateMap.set(key, fresh);
-  return fresh.length > MAX_CALLS_PER_WINDOW;
-};
-
-// helper – end call & save log
-const finalizeCall = async (roomID, reason = "completed") => {
+async function finalizeCall(roomID, reason) {
   const call = activeCalls.get(roomID);
   if (!call) return;
 
-  const { caller, receiver, startedAt, callType } = call;
+  const { startedAt } = call;
   const end = new Date();
-  const duration =
-    startedAt instanceof Date ? Math.round((end - startedAt) / 1000) : 0;
 
-  let status = reason;
-  if (reason === "timeout") status = "missed";
+  const duration = startedAt
+    ? Math.round((end - startedAt.getTime()) / 1000)
+    : 0;
 
-  try {
-    // upsert: one callLog per roomID
-    const existing = await CallLog.findOne({ roomID }).exec();
-    if (!existing) {
-      await CallLog.create({
-        roomID,
-        caller,
-        receiver,
-        callType: callType || "audio",
-        status,
-        startedAt: startedAt || end,
-        endedAt: end,
-        durationSeconds: duration,
-      });
-    } else {
-      existing.status = status;
-      existing.endedAt = end;
-      if (!existing.startedAt) existing.startedAt = startedAt || end;
-      existing.durationSeconds = duration;
-      await existing.save();
-    }
-  } catch (err) {
-    console.error("Error saving CallLog:", err.message);
-  }
+  await CallLog.findOneAndUpdate(
+    { roomID },
+    {
+      status: reason === "timeout" ? "missed" : reason,
+      endedAt: end,
+      startedAt: startedAt || end,
+      durationSeconds: duration,
+    },
+    { new: true }
+  );
 
-  // clear memory
   activeCalls.delete(roomID);
-  const timeoutId = callTimeoutMap.get(roomID);
-  if (timeoutId) {
-    clearTimeout(timeoutId);
-    callTimeoutMap.delete(roomID);
-  }
+  const t = callTimeoutMap.get(roomID);
+  if (t) clearTimeout(t);
+  callTimeoutMap.delete(roomID);
+}
 
-  // reset call states
-  if (caller) userCallState.set(String(caller), "idle");
-  if (receiver) userCallState.set(String(receiver), "idle");
-};
-
-// ===== SOCKET MAIN =====
+// -------------------------
+// SOCKET CONNECTION
+// -------------------------
 io.on("connection", async (socket) => {
-  // 1) auth: try JWT first, fallback to query.userId (for backward compatibility)
   let userId = null;
 
+  // Auth
   try {
     const token =
       socket.handshake.auth?.token ||
       socket.handshake.query?.token ||
-      (socket.handshake.headers?.authorization || "").replace("Bearer ", "");
+      (socket.handshake.headers.authorization || "").replace("Bearer ", "");
 
-    if (token && JWT_SECRET) {
+    if (token) {
       const decoded = jwt.verify(token, JWT_SECRET);
-      userId = decoded?.id || decoded?._id || decoded?.userId || null;
-    } else if (socket.handshake.query?.userId) {
-      userId = socket.handshake.query.userId; // old style
+      userId = decoded.id || decoded._id;
+    } else {
+      userId = socket.handshake.query.userId;
     }
   } catch (err) {
-    console.warn("Socket auth failed:", err.message);
+    console.error("Socket auth error:", err?.message);
+    return socket.disconnect(true);
   }
 
   if (!userId) {
-    // no auth -> disconnect
-    socket.disconnect(true);
-    return;
+    return socket.disconnect(true);
   }
 
-  setUserSocket(userId, socket.id);
-  userCallState.set(String(userId), userCallState.get(String(userId)) || "idle");
+  const uid = String(userId);
 
-  // room for direct messages
-  socket.join(String(userId));
+  // Register socket
+  setUserSocket(uid, socket.id);
+  // Join personal room
+  socket.join(uid);
 
-  // online users broadcast
-  io.emit("getOnlineUsers", Array.from(userSocketMap.keys()));
-
+  // Join conversation rooms (for messageDeleted, messagesSeen, etc.)
   try {
-    // join conversation rooms (chat)
-    const userConversations = await Conversation.find({
-      participants: userId,
-    }).select("_id");
-    userConversations.forEach(({ _id }) => socket.join(_id.toString()));
-  } catch (err) {
-    console.error("Error joining conversation rooms:", err);
+    const convs = await Conversation.find({ participants: uid }).select("_id");
+    convs.forEach((c) => socket.join(String(c._id)));
+  } catch (e) {
+    console.error("Join conversation rooms error:", e?.message);
   }
 
-  // =========================
-  //      CALL SIGNALLING
-  // =========================
+  // Send online users
+  io.emit("getOnlineUsers", [...userSocketMap.keys()]);
 
-  // 1) Caller -> invite receiver
-  // payload: { userToCall, roomID, from, name, callType }
+  // -------------------------
+  // CALL EVENTS
+  // -------------------------
+
   socket.on("callUser", async ({ userToCall, roomID, from, name, callType }) => {
     try {
-      const caller = String(from || userId);
+      const caller = String(from);
       const receiver = String(userToCall);
+      const ridSockets = getRecipientSocketIds(receiver);
 
-      // security: caller must be current socket user
-      if (caller !== String(userId)) {
-        return socket.emit("callFailed", {
-          reason: "Unauthorized caller.",
-        });
+      if (!ridSockets.length) {
+        return socket.emit("callFailed", { reason: "User offline" });
       }
 
-      // rate limit
-      if (isRateLimited(caller)) {
-        return socket.emit("callRateLimited", {
-          reason: "Too many calls in a short time.",
-        });
-      }
-
-      // busy checks
-      const callerState = userCallState.get(caller) || "idle";
-      const receiverState = userCallState.get(receiver) || "idle";
-
-      if (callerState !== "idle") {
-        return socket.emit("callFailed", { reason: "You are already in a call." });
-      }
-      if (receiverState !== "idle") {
-        return socket.emit("callBusy", { to: receiver });
-      }
-
-      const recipientSockets = getAllRecipientSockets(receiver);
-      if (!recipientSockets.length) {
-        return socket.emit("callFailed", { reason: "User is offline." });
-      }
-
-      // update states
-      userCallState.set(caller, "ringing");
-      userCallState.set(receiver, "ringing");
-
-      // create active call record
       activeCalls.set(roomID, {
         caller,
         receiver,
-        callType: callType || "audio",
+        callType,
         status: "ringing",
         startedAt: null,
       });
 
-      // create initial call log (ringing)
-      try {
-        await CallLog.create({
-          roomID,
-          caller,
-          receiver,
-          callType: callType || "audio",
-          status: "ringing",
-        });
-      } catch (e) {
-        console.error("CallLog create error:", e.message);
-      }
+      await CallLog.create({
+        roomID,
+        caller,
+        receiver,
+        callType,
+        status: "ringing",
+      });
 
-      // emit incomingCall to ALL devices of receiver
-      recipientSockets.forEach((sid) => {
+      // incomingCall → receiver all sockets
+      ridSockets.forEach((sid) => {
         io.to(sid).emit("incomingCall", {
           from: caller,
           name,
@@ -265,142 +179,138 @@ io.on("connection", async (socket) => {
         });
       });
 
-      // set timeout for missed call
-      const timeoutId = setTimeout(async () => {
-        const call = activeCalls.get(roomID);
-        if (call && call.status === "ringing") {
-          // missed call
-          await finalizeCall(roomID, "timeout");
+      // timeout
+      const t = setTimeout(async () => {
+        const data = activeCalls.get(roomID);
+        if (!data || data.status !== "ringing") return;
 
-          // notify both sides
-          const callerSockets = getAllRecipientSockets(caller);
-          const receiverSockets = getAllRecipientSockets(receiver);
+        await finalizeCall(roomID, "timeout");
 
-          callerSockets.forEach((sid) => {
-            io.to(sid).emit("callTimeout", { roomID });
-          });
-          receiverSockets.forEach((sid) => {
-            io.to(sid).emit("callTimeout", { roomID });
-          });
-        }
+        await createCallMessage({
+          sender: caller,
+          receiver,
+          callType,
+          status: "missed",
+          duration: 0,
+          io,
+        });
+
+        // inform both sides
+        const callerSockets = getRecipientSocketIds(caller);
+        callerSockets.forEach((sid) =>
+          io.to(sid).emit("callTimeout", { roomID })
+        );
+
+        const receiverSockets = getRecipientSocketIds(receiver);
+        receiverSockets.forEach((sid) =>
+          io.to(sid).emit("callTimeout", { roomID })
+        );
       }, CALL_TIMEOUT_MS);
 
-      callTimeoutMap.set(roomID, timeoutId);
+      callTimeoutMap.set(roomID, t);
     } catch (err) {
-      console.error("Error in callUser event:", err);
-      socket.emit("callFailed", { reason: "Internal error starting call." });
+      console.error("callUser error:", err?.message);
     }
   });
 
-  // 2) Receiver -> accept (answerCall) – payload { to, roomID }
-  socket.on("answerCall", async ({ to, roomID }) => {
+  socket.on("answerCall", ({ to, roomID }) => {
     try {
-      const receiver = String(userId);
-      const caller = String(to);
-
       const call = activeCalls.get(roomID);
-      if (!call || call.caller !== caller || call.receiver !== receiver) {
-        return socket.emit("callFailed", { reason: "Call not found or expired." });
-      }
+      if (!call) return;
 
-      // clear timeout
-      const timeoutId = callTimeoutMap.get(roomID);
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-        callTimeoutMap.delete(roomID);
-      }
-
-      // update states
-      userCallState.set(caller, "in-call");
-      userCallState.set(receiver, "in-call");
       call.status = "in-call";
       call.startedAt = new Date();
       activeCalls.set(roomID, call);
 
-      // update call log start time
-      try {
-        await CallLog.findOneAndUpdate(
-          { roomID },
-          { status: "completed", startedAt: call.startedAt },
-          { new: true }
-        );
-      } catch (e) {
-        console.error("CallLog update on accept:", e.message);
-      }
-
-      const callerSocketId = getRecipientSocketId(caller);
-      if (callerSocketId) {
-        io.to(callerSocketId).emit("callAccepted", { roomID });
-      }
+      const targetSockets = getRecipientSocketIds(to);
+      targetSockets.forEach((sid) =>
+        io.to(sid).emit("callAccepted", { roomID })
+      );
     } catch (err) {
-      console.error("Error in answerCall event:", err);
-      socket.emit("callFailed", { reason: "Internal error accepting call." });
+      console.error("answerCall error:", err?.message);
     }
   });
 
-  // 3) Either side -> endCall – payload { to, roomID }
+  socket.on("callRejected", async ({ to, roomID }) => {
+    try {
+      const call = activeCalls.get(roomID);
+      if (!call) return;
+
+      const { caller, receiver, callType } = call;
+      await finalizeCall(roomID, "rejected");
+
+      await createCallMessage({
+        sender: caller,
+        receiver,
+        callType,
+        status: "declined",
+        duration: 0,
+        io,
+      });
+
+      const callerSockets = getRecipientSocketIds(caller);
+      callerSockets.forEach((sid) =>
+        io.to(sid).emit("callRejected", { roomID })
+      );
+
+      const receiverSockets = getRecipientSocketIds(receiver);
+      receiverSockets.forEach((sid) =>
+        io.to(sid).emit("callRejected", { roomID })
+      );
+    } catch (err) {
+      console.error("callRejected error:", err?.message);
+    }
+  });
+
   socket.on("endCall", async ({ to, roomID }) => {
     try {
+      const call = activeCalls.get(roomID);
+      if (!call) return;
+
       const ender = String(userId);
       const target = String(to);
 
-      await finalizeCall(roomID, "completed");
+      const duration = call.startedAt
+        ? Math.round((Date.now() - call.startedAt.getTime()) / 1000)
+        : 0;
 
-      const targetSockets = getAllRecipientSockets(target);
-      targetSockets.forEach((sid) => {
-        io.to(sid).emit("callEnded", { roomID, by: ender });
+      const finalReason =
+        call.status === "ringing" || !call.startedAt
+          ? "canceled"
+          : "completed";
+
+      await finalizeCall(roomID, finalReason);
+
+      await createCallMessage({
+        sender: ender,
+        receiver: target,
+        callType: call.callType,
+        status: finalReason,
+        duration,
+        io,
       });
+
+      const targetSockets = getRecipientSocketIds(target);
+      targetSockets.forEach((sid) =>
+        io.to(sid).emit("callEnded", { roomID })
+      );
     } catch (err) {
-      console.error("Error in endCall event:", err);
+      console.error("endCall error:", err?.message);
     }
   });
 
-  // 4) Call Rejected – payload { to, roomID }
-  socket.on("callRejected", async ({ to, roomID }) => {
-    try {
-      const rejector = String(userId);
-      const caller = String(to);
-
-      // finalize log as rejected
-      await finalizeCall(roomID, "rejected");
-
-      const callerSockets = getAllRecipientSockets(caller);
-      callerSockets.forEach((sid) => {
-        io.to(sid).emit("callRejected", { roomID, by: rejector });
-      });
-    } catch (err) {
-      console.error("Error in callRejected event:", err);
-    }
-  });
-
-  // keep your existing joinConversationRoom for chat
-  socket.on("joinConversationRoom", ({ conversationId }) => {
-    if (conversationId) socket.join(String(conversationId));
-  });
-
-  // DISCONNECT – clean call state if in-call
-  socket.on("disconnect", async () => {
-    const uid = String(userId);
+  // -------------------------
+  // DISCONNECT
+  // -------------------------
+  socket.on("disconnect", () => {
     removeUserSocket(socket.id);
-
-    // online users refresh
-    io.emit("getOnlineUsers", Array.from(userSocketMap.keys()));
-
-    // if user in active call, end it and notify peer
-    for (const [roomID, call] of activeCalls.entries()) {
-      if (String(call.caller) === uid || String(call.receiver) === uid) {
-        const other =
-          String(call.caller) === uid ? String(call.receiver) : String(call.caller);
-
-        await finalizeCall(roomID, "completed");
-
-        const otherSockets = getAllRecipientSockets(other);
-        otherSockets.forEach((sid) => {
-          io.to(sid).emit("callEnded", { roomID, by: uid });
-        });
-      }
-    }
+    io.emit("getOnlineUsers", [...userSocketMap.keys()]);
   });
 });
 
-module.exports = { app, server, io, getRecipientSocketId, userSocketMap };
+module.exports = {
+  app,
+  server,
+  io,
+  getRecipientSocketIds,
+};
