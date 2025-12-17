@@ -4,60 +4,77 @@ const Message = require("../models/message.model");
 const Conversation = require("../models/conversation.model");
 
 module.exports.createCallMessage = async ({
-  sender,    // caller id (string or ObjectId)
-  receiver,  // other user id
-  callType,  // "audio" | "video"
-  status,    // "completed" | "missed" | "declined" | "canceled"
+  sender,
+  receiver,
+  callType,
+  status,
   duration = 0,
   io,
+  conversationId = null,   // ⭐ NEW
+  isGroup = false,         // ⭐ NEW
 }) => {
   try {
-    const senderId = new mongoose.Types.ObjectId(String(sender));
-    const receiverId = new mongoose.Types.ObjectId(String(receiver));
+    let conversation;
 
-    let conversation = await Conversation.findOne({
-      participants: { $all: [senderId, receiverId] },
-      isGroup: false,
-    });
+    if (isGroup && conversationId) {
+      // ⭐ Group call → group conversation ကိုပဲသုံးမယ်
+      conversation = await Conversation.findById(conversationId);
+    } else {
+      // ⭐ Single call → အရင်လို sender/receiver နဲ့ DM လုပ်မယ်
+      const senderId = new mongoose.Types.ObjectId(String(sender));
+      const receiverId = new mongoose.Types.ObjectId(String(receiver));
 
-    if (!conversation) {
-      conversation = await Conversation.create({
-        participants: [senderId, receiverId],
+      conversation = await Conversation.findOne({
+        participants: { $all: [senderId, receiverId] },
         isGroup: false,
       });
+
+      if (!conversation) {
+        conversation = await Conversation.create({
+          participants: [senderId, receiverId],
+          isGroup: false,
+        });
+      }
     }
 
-    const callInfo = {
-      callType,      // "audio" | "video"
-      status,        // "completed" | "missed" | "declined" | "canceled"
-      duration,      // seconds
-    };
+    if (!conversation) return;
+
+    const callInfo = { callType, status, duration };
 
     const msg = await Message.create({
       conversationId: conversation._id,
-      sender: senderId,   
-      receiver: receiverId,
+      sender,
+      receiver: isGroup ? null : receiver,
       text: "",
       messageType: "call",
       callInfo,
       attachments: [],
-      seenBy: [senderId],
+      seenBy: [sender],
     });
 
     conversation.lastMessage = {
       _id: msg._id,
       text: "",
-      sender: senderId,
-      seenBy: [senderId],
+      sender,
+      seenBy: [sender],
       updatedAt: new Date(),
+      callInfo,
     };
     await conversation.save();
 
-    io.to(String(senderId)).emit("newMessage", msg);
-    io.to(String(receiverId)).emit("newMessage", msg);
+    // ⭐ Emit
+    if (isGroup) {
+      // Group call → Group conversation room
+      io.to(String(conversation._id)).emit("newMessage", msg);
+    } else {
+      // Single call → A & B only
+      io.to(String(sender)).emit("newMessage", msg);
+      io.to(String(receiver)).emit("newMessage", msg);
+    }
 
     return msg;
   } catch (err) {
     console.error("createCallMessage error:", err);
   }
 };
+

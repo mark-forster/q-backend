@@ -1,3 +1,4 @@
+// controllers/message.controller.js
 const Message = require("../models/message.model");
 const catchAsync = require("../config/catchAsync");
 const ApiError = require("../config/apiError");
@@ -27,26 +28,55 @@ const startConversation = catchAsync(async (req, res) => {
 });
 
 const sendMessage = catchAsync(async (req, res, next) => {
-  const { recipientId, message } = req.body;
+  const { recipientId, message, conversationId, replyTo } = req.body;
   const files = req.files;
   const senderId = req.user._id;
+
   const newMessage = await messageService.sendMessage({
     recipientId,
+    conversationId,
     message,
     senderId,
     files,
+    replyTo,
+    
   });
+
   res
     .status(201)
     .json({ message: "Message sent successfully", data: newMessage });
 });
 
-// 💡 UPDATED: getMessages controller
+// getMessages controller (with pagination)
 const getMessages = catchAsync(async (req, res, next) => {
   const { conversationId } = req.params;
-  const userId = req.user._id; // 💡 NEW: Get the current user's ID
-  const result = await messageService.getMessages({ conversationId, userId }); // 💡 UPDATED: Pass userId to the service
+  const userId = req.user._id;
+  const { skip = 0, limit = 50 } = req.query;
+
+  const result = await messageService.getMessages({
+    conversationId,
+    userId,
+    skip,
+    limit,
+  });
   res.send(result);
+});
+
+const searchMessages = catchAsync(async (req, res) => {
+  const { conversationId } = req.params;
+  const userId = req.user._id;
+  const { text = "" } = req.query;
+
+  const data = await messageService.searchMessages({
+    conversationId,
+    userId,
+    text,
+  });
+
+  res.status(200).json({
+    message: "Messages search result",
+    data,
+  });
 });
 
 const getConversations = catchAsync(async (req, res, next) => {
@@ -60,7 +90,8 @@ const getConversations = catchAsync(async (req, res, next) => {
 });
 
 const createGroupChat = catchAsync(async (req, res, next) => {
-  const { name, participants } = req.body;
+  const { name } = req.body;
+  const participants = req.body.members;
   const creatorId = req.user._id;
 
   const group = await messageService.createGroupChat({
@@ -78,8 +109,13 @@ const createGroupChat = catchAsync(async (req, res, next) => {
 
 const renameGroup = catchAsync(async (req, res, next) => {
   const { conversationId, name } = req.body;
+  const currentUserId = req.user._id;
 
-  const result = await messageService.renameGroup({ conversationId, name });
+  const result = await messageService.renameGroup({
+    conversationId,
+    name,
+    currentUserId,
+  });
   if (!result) {
     return res.status(400).json({ message: "Failed to rename group" });
   }
@@ -88,8 +124,13 @@ const renameGroup = catchAsync(async (req, res, next) => {
 
 const addToGroup = catchAsync(async (req, res, next) => {
   const { conversationId, userId } = req.body;
+  const currentUserId = req.user._id;
 
-  const result = await messageService.addToGroup({ conversationId, userId });
+  const result = await messageService.addToGroup({
+    conversationId,
+    userId,
+    currentUserId,
+  });
   if (!result) {
     return res.status(400).json({ message: "Failed to add member to group" });
   }
@@ -98,10 +139,12 @@ const addToGroup = catchAsync(async (req, res, next) => {
 
 const removeFromGroup = catchAsync(async (req, res, next) => {
   const { conversationId, userId } = req.body;
+  const currentUserId = req.user._id;
 
   const result = await messageService.removeFromGroup({
     conversationId,
     userId,
+    currentUserId,
   });
   if (!result) {
     return res
@@ -115,7 +158,7 @@ const removeFromGroup = catchAsync(async (req, res, next) => {
 
 const deleteMessage = catchAsync(async (req, res, next) => {
   const { messageId } = req.params;
-  const { deleteForEveryone } = req.query;
+  const { deleteForEveryone } = req.query; // kept for compatibility
   const currentUserId = req.user._id;
 
   const result = await messageService.deleteMessage({
@@ -149,40 +192,51 @@ const deleteConversation = catchAsync(async (req, res, next) => {
     return res
       .status(404)
       .json({ message: "Conversation not found or unauthorized" });
-  } // Socket event participants
-
-  if (req.io) {
-    result.participants.forEach((participantId) => {
-      req.io.to(participantId.toString()).emit("conversationDeleted", {
-        conversationId: result.deletedConversationId.toString(),
-      });
-    });
   }
 
   res.status(200).json({
     message: "Conversation deleted successfully",
-    data: { conversationId: result.deletedConversationId },
+    data: { conversationId: result.conversationId },
   });
 });
 
-// update Method
+// update Method (EDIT MESSAGE)
 const updateMessage = catchAsync(async (req, res) => {
   const { messageId } = req.params;
-  const { newText } = req.body;
+  // 🔧 FIX: frontend က newText သို့မဟုတ် message နဲ့ပို့လာနိုင်လို့
+  // နှစ်မျိုးလုံးကို support လုပ်ပေးထားတယ်
+  const { newText, message } = req.body;
   const currentUserId = req.user._id;
+
+  const textToUpdate =
+    typeof newText === "string" && newText.length
+      ? newText
+      : typeof message === "string"
+      ? message
+      : "";
+
+  if (!textToUpdate.trim()) {
+    return res
+      .status(400)
+      .json({ message: "Updated text cannot be empty." });
+  }
+
   const result = await messageService.updateMessage({
     messageId,
-    newText,
+    newText: textToUpdate,
     currentUserId,
   });
+
   if (!result) {
     return res
       .status(405)
       .json({ message: "Message not found or unauthorized" });
   }
+
+  // 🔧 FIX: full updated message ကို data အနေနဲ့ ပြန်ပို့မယ်
   res.status(200).json({
     message: "Message Updated Successfully",
-    data: { messageId: result.messageId },
+    data: result,
   });
 });
 
@@ -270,7 +324,7 @@ const getSignedUrl = catchAsync(async (req, res) => {
   return res.json({ url });
 });
 
-// 💡 NEW: Delete For Me controller function
+// Delete For Me controller function
 const deleteMessageForMe = catchAsync(async (req, res, next) => {
   const { messageId } = req.params;
   const currentUserId = req.user._id;
@@ -301,19 +355,86 @@ const updateMessagesSeenStatus = async (req, res) => {
 
     // Call the updated service function
     await messageService.updateMessagesSeenStatus({ conversationId, userId });
-    res.status(200).json({ message: "Messages seen status updated successfully." });
+    res
+      .status(200)
+      .json({ message: "Messages seen status updated successfully." });
   } catch (error) {
     console.error("Update Messages Seen Status Controller Error:", error);
     res.status(500).json({ error: "Internal Server Error" });
   }
 };
 
+// Reactions
+const reactToMessage = catchAsync(async (req, res) => {
+  const { messageId } = req.params;
+  const { emoji } = req.body;
+  const userId = req.user._id;
 
+  const updated = await messageService.reactToMessage({
+    messageId,
+    userId,
+    emoji,
+  });
+
+  res.status(200).json({
+    message: "Reaction updated",
+    data: updated,
+  });
+});
+
+// For DELETE reaction we can just call with empty emoji
+const removeReaction = catchAsync(async (req, res) => {
+  const { messageId } = req.params;
+  const userId = req.user._id;
+
+  const updated = await messageService.reactToMessage({
+    messageId,
+    userId,
+    emoji: "",
+  });
+
+  res.status(200).json({
+    message: "Reaction removed",
+    data: updated,
+  });
+});
+
+// Pin / Unpin
+const pinMessage = catchAsync(async (req, res) => {
+  const { conversationId, messageId } = req.params;
+  const userId = req.user._id;
+
+  const conv = await messageService.pinMessage({
+    conversationId,
+    messageId,
+    userId,
+  });
+
+  res.status(200).json({
+    message: "Message pinned",
+    data: conv,
+  });
+});
+
+const unpinMessage = catchAsync(async (req, res) => {
+  const { conversationId, messageId } = req.params;
+
+  const conv = await messageService.unpinMessage({
+    conversationId,
+    messageId,
+  });
+
+  res.status(200).json({
+    message: "Message unpinned",
+    data: conv,
+  });
+});
 
 module.exports = {
   startConversation,
   sendMessage,
   getMessages,
+  searchMessages,
   getConversations,
   createGroupChat,
   renameGroup,
@@ -325,5 +446,9 @@ module.exports = {
   forwardMessage,
   getSignedUrl,
   deleteMessageForMe,
-  updateMessagesSeenStatus
+  updateMessagesSeenStatus,
+  reactToMessage,
+  removeReaction,
+  pinMessage,
+  unpinMessage,
 };

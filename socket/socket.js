@@ -1,4 +1,6 @@
-// socket.js
+// ===============================================
+//  socket.js — STABLE VERSION (GROUP + SINGLE CALL FIXED)
+// ===============================================
 const { Server } = require("socket.io");
 const http = require("http");
 const express = require("express");
@@ -14,37 +16,31 @@ const { createCallMessage } = require("../helpers/createCallMessage");
 
 const JWT_SECRET = config.jwt?.secret || process.env.JWT_SECRET;
 
-// USER SOCKET STORAGE
-// userId -> Set(socketIds)
+/* ---------------------------------------------------
+   SOCKET USER MAPS
+--------------------------------------------------- */
 const userSocketMap = new Map();
-// socketId -> userId
 const socketToUserId = new Map();
 
-// roomID -> call info
+/* ---------------------------------------------------
+   ACTIVE CALLS
+--------------------------------------------------- */
 const activeCalls = new Map();
-// roomID -> timeoutRef
 const callTimeoutMap = new Map();
-
 const CALL_TIMEOUT_MS = 30000;
 
-// Exportable for message.service.js
+/* ---------------------------------------------------
+   Helpers
+--------------------------------------------------- */
 function getRecipientSocketIds(userId) {
   const set = userSocketMap.get(String(userId));
   return set ? [...set] : [];
 }
 
-const io = new Server(server, {
-  cors: {
-    origin: config.cors?.prodOrigins || "*",
-    methods: ["GET", "POST"],
-    credentials: true,
-  },
-  transports: ["websocket", "polling"],
-});
+function getOnlineUserIds() {
+  return [...userSocketMap.keys()];
+}
 
-// -------------------------
-// Helpers
-// -------------------------
 function setUserSocket(userId, socketId) {
   const id = String(userId);
   const set = userSocketMap.get(id) || new Set();
@@ -65,21 +61,21 @@ function removeUserSocket(socketId) {
   socketToUserId.delete(socketId);
 }
 
+/* ---------------------------------------------------
+   Finalize Call
+--------------------------------------------------- */
 async function finalizeCall(roomID, reason) {
   const call = activeCalls.get(roomID);
   if (!call) return;
 
-  const { startedAt } = call;
+  const { startedAt, participants } = call;
   const end = new Date();
-
-  const duration = startedAt
-    ? Math.round((end - startedAt.getTime()) / 1000)
-    : 0;
+  const duration = startedAt ? Math.round((end - startedAt) / 1000) : 0;
 
   await CallLog.findOneAndUpdate(
     { roomID },
     {
-      status: reason === "timeout" ? "missed" : reason,
+      status: reason,
       endedAt: end,
       startedAt: startedAt || end,
       durationSeconds: duration,
@@ -87,19 +83,38 @@ async function finalizeCall(roomID, reason) {
     { new: true }
   );
 
+  participants.forEach((uid) => {
+    getRecipientSocketIds(uid).forEach((sid) =>
+      io.to(sid).emit("callEnded", { roomID })
+    );
+  });
+
   activeCalls.delete(roomID);
+
   const t = callTimeoutMap.get(roomID);
   if (t) clearTimeout(t);
   callTimeoutMap.delete(roomID);
 }
 
-// -------------------------
-// SOCKET CONNECTION
-// -------------------------
+/* ---------------------------------------------------
+   Init IO
+--------------------------------------------------- */
+const io = new Server(server, {
+  cors: {
+    origin: config.cors?.prodOrigins || "*",
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
+  transports: ["websocket", "polling"],
+});
+
+/* ---------------------------------------------------
+   ON SOCKET CONNECT
+--------------------------------------------------- */
 io.on("connection", async (socket) => {
   let userId = null;
 
-  // Auth
+  /* ------------ AUTH ------------ */
   try {
     const token =
       socket.handshake.auth?.token ||
@@ -113,204 +128,334 @@ io.on("connection", async (socket) => {
       userId = socket.handshake.query.userId;
     }
   } catch (err) {
-    console.error("Socket auth error:", err?.message);
     return socket.disconnect(true);
   }
 
-  if (!userId) {
-    return socket.disconnect(true);
-  }
+  if (!userId) return socket.disconnect(true);
 
   const uid = String(userId);
-
-  // Register socket
   setUserSocket(uid, socket.id);
-  // Join personal room
   socket.join(uid);
 
-  // Join conversation rooms (for messageDeleted, messagesSeen, etc.)
+  // join user's conversations
   try {
     const convs = await Conversation.find({ participants: uid }).select("_id");
     convs.forEach((c) => socket.join(String(c._id)));
-  } catch (e) {
-    console.error("Join conversation rooms error:", e?.message);
-  }
+  } catch {}
 
-  // Send online users
-  io.emit("getOnlineUsers", [...userSocketMap.keys()]);
+  io.emit("getOnlineUsers", getOnlineUserIds());
 
-  // -------------------------
-  // CALL EVENTS
-  // -------------------------
+  /* ------------ TYPING ------------ */
+  socket.on("typing", ({ conversationId }) => {
+    if (conversationId) {
+      io.to(String(conversationId)).emit("typing", { conversationId, userId: uid });
+    }
+  });
 
-  socket.on("callUser", async ({ userToCall, roomID, from, name, callType }) => {
+  socket.on("stopTyping", ({ conversationId }) => {
+    if (conversationId) {
+      io.to(String(conversationId)).emit("stopTyping", { conversationId, userId: uid });
+    }
+  });
+
+  /* ---------------------------------------------------
+     CALL USER (Group + Single)
+  --------------------------------------------------- */
+  socket.on("callUser", async ({ userToCall, conversationId, roomID, from, name, callType }) => {
     try {
       const caller = String(from);
-      const receiver = String(userToCall);
-      const ridSockets = getRecipientSocketIds(receiver);
+      let receivers = [];
 
-      if (!ridSockets.length) {
-        return socket.emit("callFailed", { reason: "User offline" });
+      // GROUP CALL
+      if (conversationId) {
+        const conv = await Conversation.findById(conversationId).select("participants");
+        if (!conv) return;
+
+        receivers = conv.participants
+          .map((id) => String(id))
+          .filter((id) => id !== caller);
+
+        activeCalls.set(roomID, {
+          caller,
+          participants: [caller, ...receivers],
+          callType,
+          status: "ringing",
+          startedAt: null,
+          isGroup: true,
+          conversationId,
+        });
+
+      } else {
+        // SINGLE CALL
+        receivers = Array.isArray(userToCall)
+          ? userToCall.map(String)
+          : [String(userToCall)];
+
+        activeCalls.set(roomID, {
+          caller,
+          participants: [...new Set([caller, ...receivers])],
+          callType,
+          status: "ringing",
+          startedAt: null,
+          isGroup: false,
+        });
       }
 
-      activeCalls.set(roomID, {
-        caller,
-        receiver,
-        callType,
-        status: "ringing",
-        startedAt: null,
+      // Incoming Call
+      receivers.forEach((rid) => {
+        getRecipientSocketIds(rid).forEach((sid) =>
+          io.to(sid).emit("incomingCall", {
+            from: caller,
+            name,
+            callType,
+            roomID,
+            group: receivers.length > 1,
+            receivers,
+            conversationId: conversationId || null,
+          })
+        );
       });
 
-      await CallLog.create({
-        roomID,
-        caller,
-        receiver,
-        callType,
-        status: "ringing",
-      });
-
-      // incomingCall → receiver all sockets
-      ridSockets.forEach((sid) => {
-        io.to(sid).emit("incomingCall", {
-          from: caller,
-          name,
-          callType,
-          roomID,
-        });
-      });
-
-      // timeout
+      // TIMEOUT
       const t = setTimeout(async () => {
-        const data = activeCalls.get(roomID);
-        if (!data || data.status !== "ringing") return;
+        const call = activeCalls.get(roomID);
+        if (!call || call.status !== "ringing") return;
 
         await finalizeCall(roomID, "timeout");
 
-        await createCallMessage({
-          sender: caller,
-          receiver,
-          callType,
-          status: "missed",
-          duration: 0,
-          io,
-        });
-
-        // inform both sides
-        const callerSockets = getRecipientSocketIds(caller);
-        callerSockets.forEach((sid) =>
-          io.to(sid).emit("callTimeout", { roomID })
-        );
-
-        const receiverSockets = getRecipientSocketIds(receiver);
-        receiverSockets.forEach((sid) =>
-          io.to(sid).emit("callTimeout", { roomID })
-        );
+        const callerId = call.caller;
+        for (const rid of call.participants) {
+          if (rid === callerId) continue;
+          await createCallMessage({
+            sender: callerId,
+            receiver: call.isGroup ? null : rid,
+            callType,
+            status: "missed",
+            duration: 0,
+            io,
+            isGroup: call.isGroup,
+            conversationId: call.conversationId || null,
+          });
+        }
       }, CALL_TIMEOUT_MS);
 
       callTimeoutMap.set(roomID, t);
     } catch (err) {
-      console.error("callUser error:", err?.message);
+      console.error("callUser error:", err.message);
     }
   });
 
-  socket.on("answerCall", ({ to, roomID }) => {
-    try {
-      const call = activeCalls.get(roomID);
-      if (!call) return;
+  /* ---------------------------------------------------
+     ANSWER CALL
+  --------------------------------------------------- */
+  socket.on("answerCall", ({ roomID }) => {
+    const call = activeCalls.get(roomID);
+    if (!call) return;
 
-      call.status = "in-call";
-      call.startedAt = new Date();
-      activeCalls.set(roomID, call);
+    call.status = "in-call";
+    if (!call.startedAt) call.startedAt = new Date();
 
-      const targetSockets = getRecipientSocketIds(to);
-      targetSockets.forEach((sid) =>
+    call.participants.forEach((uidInCall) => {
+      getRecipientSocketIds(uidInCall).forEach((sid) =>
         io.to(sid).emit("callAccepted", { roomID })
       );
-    } catch (err) {
-      console.error("answerCall error:", err?.message);
-    }
+
+      getRecipientSocketIds(uidInCall).forEach((sid) =>
+        io.to(sid).emit("groupCallParticipantJoined", {
+          roomID,
+          userId: uid,
+        })
+      );
+    });
   });
 
+  /* ---------------------------------------------------
+     REJECT CALL
+  --------------------------------------------------- */
   socket.on("callRejected", async ({ to, roomID }) => {
     try {
       const call = activeCalls.get(roomID);
       if (!call) return;
 
-      const { caller, receiver, callType } = call;
-      await finalizeCall(roomID, "rejected");
+      const rejecterId = uid;
+      const callerId = call.caller;
 
+      // Remove rejecter
+      call.participants = call.participants.filter((u) => u !== rejecterId);
+
+      // SINGLE CALL → notify caller
+      if (!call.isGroup) {
+        getRecipientSocketIds(to).forEach((sid) =>
+          io.to(sid).emit("callRejected", { roomID })
+        );
+      }
+
+      // GROUP CALL → notify participants only
+      if (call.isGroup) {
+        call.participants.forEach((uidInCall) => {
+          getRecipientSocketIds(uidInCall).forEach((sid) =>
+            io.to(sid).emit("groupCallParticipantLeft", {
+              roomID,
+              userId: rejecterId,
+            })
+          );
+        });
+      }
+
+      // End call if no one left except caller
+      if (call.participants.length <= 1) {
+        await finalizeCall(roomID, "declined");
+      }
+
+      // Message log
       await createCallMessage({
-        sender: caller,
-        receiver,
-        callType,
+        sender: callerId,
+        receiver: call.isGroup ? null : rejecterId,
+        callType: call.callType,
         status: "declined",
         duration: 0,
         io,
+        isGroup: call.isGroup,
+        conversationId: call.conversationId || null,
       });
 
-      const callerSockets = getRecipientSocketIds(caller);
-      callerSockets.forEach((sid) =>
-        io.to(sid).emit("callRejected", { roomID })
-      );
-
-      const receiverSockets = getRecipientSocketIds(receiver);
-      receiverSockets.forEach((sid) =>
-        io.to(sid).emit("callRejected", { roomID })
-      );
     } catch (err) {
-      console.error("callRejected error:", err?.message);
+      console.error("callRejected:", err.message);
     }
   });
 
-  socket.on("endCall", async ({ to, roomID }) => {
+  /* ---------------------------------------------------
+     CANCEL CALL BY CALLER
+  --------------------------------------------------- */
+  socket.on("cancelCall", async ({ roomID }) => {
     try {
       const call = activeCalls.get(roomID);
       if (!call) return;
 
-      const ender = String(userId);
-      const target = String(to);
+      const callerId = call.caller;
 
-      const duration = call.startedAt
-        ? Math.round((Date.now() - call.startedAt.getTime()) / 1000)
-        : 0;
+      const t = callTimeoutMap.get(roomID);
+      if (t) clearTimeout(t);
+      callTimeoutMap.delete(roomID);
 
-      const finalReason =
-        call.status === "ringing" || !call.startedAt
-          ? "canceled"
-          : "completed";
+      const others = call.participants.filter((u) => u !== callerId);
 
-      await finalizeCall(roomID, finalReason);
+      await finalizeCall(roomID, "canceled");
 
-      await createCallMessage({
-        sender: ender,
-        receiver: target,
-        callType: call.callType,
-        status: finalReason,
-        duration,
-        io,
+      // Notify receivers
+      others.forEach((rid) => {
+        getRecipientSocketIds(rid).forEach((sid) =>
+          io.to(sid).emit("callCanceled", { roomID })
+        );
       });
 
-      const targetSockets = getRecipientSocketIds(target);
-      targetSockets.forEach((sid) =>
-        io.to(sid).emit("callEnded", { roomID })
-      );
+      // Message log
+      for (const rid of others) {
+        await createCallMessage({
+          sender: callerId,
+          receiver: call.isGroup ? null : rid,
+          callType: call.callType,
+          status: "canceled",
+          duration: 0,
+          io,
+          isGroup: call.isGroup,
+          conversationId: call.conversationId || null,
+        });
+      }
+
     } catch (err) {
-      console.error("endCall error:", err?.message);
+      console.error("cancelCall:", err.message);
     }
   });
 
-  // -------------------------
-  // DISCONNECT
-  // -------------------------
+  /* ---------------------------------------------------
+     END CALL
+  --------------------------------------------------- */
+  socket.on("endCall", async ({ roomID }) => {
+    try {
+      const call = activeCalls.get(roomID);
+      if (!call) return;
+
+      const ender = uid;
+      const callerId = call.caller;
+      const before = [...call.participants];
+
+      const end = new Date();
+      const duration = call.startedAt
+        ? Math.round((end - call.startedAt) / 1000)
+        : 0;
+
+      let callEndedNow = false;
+
+      // Caller ended call → force end
+      if (ender === callerId) {
+        await finalizeCall(roomID, "completed");
+        callEndedNow = true;
+
+      } else {
+        // Participant left
+        call.participants = call.participants.filter((u) => u !== ender);
+
+        // Notify remaining group callers
+        call.participants.forEach((uidInCall) => {
+          getRecipientSocketIds(uidInCall).forEach((sid) =>
+            io.to(sid).emit("groupCallParticipantLeft", {
+              roomID,
+              userId: ender,
+            })
+          );
+        });
+
+        // If only caller left → end call
+        if (call.participants.length <= 1) {
+          await finalizeCall(roomID, "completed");
+          callEndedNow = true;
+
+        } else {
+          // Only remove UI for leaver
+          getRecipientSocketIds(ender).forEach((sid) =>
+            io.to(sid).emit("callEnded", { roomID })
+          );
+        }
+      }
+
+      // Add call message log
+      if (callEndedNow) {
+        const others = before.filter((u) => u !== callerId);
+
+        for (const rid of others) {
+          await createCallMessage({
+            sender: callerId,
+            receiver: call.isGroup ? null : rid,
+            callType: call.callType,
+            status: "completed",
+            duration,
+            io,
+            isGroup: call.isGroup,
+            conversationId: call.conversationId || null,
+          });
+        }
+      }
+
+    } catch (err) {
+      console.error("endCall:", err.message);
+    }
+  });
+
+  /* ------------ DISCONNECT ------------ */
   socket.on("disconnect", () => {
     removeUserSocket(socket.id);
-    io.emit("getOnlineUsers", [...userSocketMap.keys()]);
+    io.emit("getOnlineUsers", getOnlineUserIds());
   });
 });
 
+/* ---------------------------------------------------
+   EXPORT
+--------------------------------------------------- */
 module.exports = {
   app,
   server,
   io,
   getRecipientSocketIds,
+  getOnlineUserIds,
 };

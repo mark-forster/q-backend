@@ -1,4 +1,4 @@
-// message.model.js
+// models/message.model.js
 const mongoose = require("mongoose");
 
 // ---- Attachment Subdocument ----
@@ -28,6 +28,8 @@ const attachmentSchema = new mongoose.Schema(
       default: null,
     },
     mimeType: { type: String, default: null },
+    // ✅ for private audio/video/raw signed URL
+    signedUrl: { type: String, default: null },
   },
   { _id: false }
 );
@@ -37,7 +39,15 @@ const callInfoSchema = new mongoose.Schema(
   {
     status: {
       type: String,
-      enum: ["outgoing", "incoming", "missed", "declined", "completed"],
+      enum: [
+        "outgoing",
+        "incoming",
+        "missed",
+        "declined",
+        "completed",
+        "timeout",
+        "canceled",
+      ],
     },
     callType: {
       type: String,
@@ -45,6 +55,15 @@ const callInfoSchema = new mongoose.Schema(
       default: "audio",
     },
     duration: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
+// Reaction schema
+const reactionSchema = new mongoose.Schema(
+  {
+    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    emoji: { type: String, required: true },
   },
   { _id: false }
 );
@@ -63,6 +82,13 @@ const messageSchema = new mongoose.Schema(
       required: true,
     },
 
+    // ✅ for direct messages / call messages
+    receiver: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: false,
+    },
+
     text: { type: String },
 
     attachments: {
@@ -70,10 +96,30 @@ const messageSchema = new mongoose.Schema(
       default: [],
     },
 
+    // ✅ to distinguish text / call / system
+    messageType: {
+      type: String,
+      enum: ["text", "call", "system"],
+      default: "text",
+    },
+
     // Call message support
     callInfo: {
       type: callInfoSchema,
       default: null,
+    },
+
+    // ✅ Reply / Quote
+    replyTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Message",
+      default: null,
+    },
+
+    // ✅ Reactions (👍❤️😂…)
+    reactions: {
+      type: [reactionSchema],
+      default: [],
     },
 
     deletedBy: [

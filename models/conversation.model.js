@@ -35,7 +35,7 @@ const lastMessageSchema = new mongoose.Schema(
     // message id of last message
     _id: { type: mongoose.Schema.Types.ObjectId, ref: "Message" },
 
-    // ✅ NEW: callInfo for call preview in sidebar
+    // ✅ callInfo for call preview in sidebar
     callInfo: {
       type: lastCallInfoSchema,
       default: null,
@@ -45,6 +45,24 @@ const lastMessageSchema = new mongoose.Schema(
     _id: false,
     timestamps: true, // createdAt / updatedAt for lastMessage
   }
+);
+
+// ✅ pinned messages for conversation (Telegram style)
+const pinnedMessageSchema = new mongoose.Schema(
+  {
+    messageId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Message",
+      required: true,
+    },
+    pinnedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    pinnedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
 );
 
 const conversationSchema = new mongoose.Schema(
@@ -64,7 +82,7 @@ const conversationSchema = new mongoose.Schema(
       { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     ],
 
-    // ✅ Optional: Group admins (for advanced permissions)
+    // ✅ Group admins (for advanced permissions)
     admins: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
 
     // Last message preview
@@ -72,6 +90,12 @@ const conversationSchema = new mongoose.Schema(
 
     // Soft delete: who deleted this conversation
     deletedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+
+    // ✅ Pinned messages
+    pinnedMessages: {
+      type: [pinnedMessageSchema],
+      default: [],
+    },
   },
   { timestamps: true }
 );

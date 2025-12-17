@@ -1,7 +1,7 @@
 // services/message.service.js
 const Message = require("../models/message.model");
 const Conversation = require("../models/conversation.model");
-const { io, getRecipientSocketIds } = require("../socket/socket");
+const { io, getRecipientSocketIds, getOnlineUserIds } = require("../socket/socket");
 const cloudinary = require("cloudinary").v2;
 const fs = require("fs");
 
@@ -10,13 +10,27 @@ const fs = require("fs");
 // -----------------------------
 const createGroupChat = async ({ name, participants, creatorId }) => {
   try {
+    const uniqueParticipants = [
+      ...new Set([...participants.map(String), String(creatorId)]),
+    ];
     const conversation = new Conversation({
       isGroup: true,
       name,
-      participants: [...new Set([...participants, creatorId])],
+      participants: uniqueParticipants,
+      admins: [creatorId], // creator is admin
     });
     await conversation.save();
-    return conversation;
+   // ⭐ REAL-TIME EVENT EMIT (Fix)
+    const convObj = (await conversation.populate("participants", "username name profilePic")).toObject();
+
+    uniqueParticipants.forEach((uid) => {
+      const socketIds = getRecipientSocketIds(uid);
+      socketIds.forEach((sid) =>
+        io.to(sid).emit("conversationCreated", convObj)
+      );
+    });
+     return convObj;
+
   } catch (error) {
     console.error("Group Chat Creation Error:", error);
     return null;
@@ -27,7 +41,7 @@ const findConversation = async (userId, otherUserId) => {
   try {
     const conversation = await Conversation.findOne({
       isGroup: false,
-      participants: { $all: [userId, otherUserId] },
+      participants: { $all: [userId, otherUserId], $size: 2 },
     }).populate("participants", "username profilePic name updatedAt");
     return conversation;
   } catch (error) {
@@ -40,7 +54,7 @@ const findConversation = async (userId, otherUserId) => {
 // Helper: Upload Attachments
 // -----------------------------
 async function uploadAttachments(files = []) {
-  if (!files.length) return [];
+  if (!files || !files.length) return [];
 
   const uploads = files.map(async (file) => {
     const mimeType = file.mimetype || "";
@@ -92,6 +106,7 @@ async function uploadAttachments(files = []) {
       resource_type: uploaded.resource_type || null,
       cloudinary_type: uploadOptions.type || null,
       mimeType,
+      signedUrl: null,
     };
   });
 
@@ -99,7 +114,16 @@ async function uploadAttachments(files = []) {
 }
 
 // Helper: build lastMessage text
-function resolveLastMessageText(messageText, attachments = []) {
+function resolveLastMessageText(messageText, attachments = [], messageType = "text", callInfo = null) {
+  if (messageType === "call") {
+    if (!callInfo) return "Call";
+    if (callInfo.status === "missed") return `Missed ${callInfo.callType} call`;
+    if (callInfo.status === "declined") return `Declined ${callInfo.callType} call`;
+    if (callInfo.status === "completed") return "Call ended";
+    if (callInfo.status === "timeout") return "Call timeout";
+    return `${callInfo.callType} call`;
+  }
+
   if (messageText && messageText.trim()) return messageText.trim();
   if (!attachments.length) return "";
 
@@ -121,21 +145,26 @@ function emitToUser(userId, event, payload) {
 }
 
 // -----------------------------
-// SEND MESSAGE
+// SEND MESSAGE (single + group)
 // -----------------------------
+// ======================================================
+//        SEND MESSAGE (Patched Auto-Restore Version)
+// ======================================================
 const sendMessage = async ({
   recipientId,
   conversationId,
   message,
   senderId,
   files,
+  replyTo,
 }) => {
   try {
-    let conversation = null;
     const sender = String(senderId);
-    const receiver = String(recipientId);
+    let receiver = recipientId ? String(recipientId) : null;
+    let conversation = null;
+    let isNewConversation = false;
 
-    // 1) Try to use provided conversationId (if any)
+    // 1) Try find by conversationId
     if (conversationId) {
       conversation = await Conversation.findById(conversationId).populate(
         "participants",
@@ -143,94 +172,174 @@ const sendMessage = async ({
       );
     }
 
-    // 2) Fallback: find by participants
+    // 2) If no conversation → create/find DM
     if (!conversation) {
+      if (!receiver) throw new Error("recipientId required for new conversation");
+
       conversation = await Conversation.findOne({
         isGroup: false,
-        participants: { $all: [sender, receiver] },
+        participants: { $all: [sender, receiver], $size: 2 },
       }).populate("participants", "username profilePic name updatedAt");
+
+      if (!conversation) {
+        conversation = await Conversation.create({
+          isGroup: false,
+          participants: [sender, receiver],
+        });
+        conversation = await conversation.populate(
+          "participants",
+          "username profilePic name updatedAt"
+        );
+        isNewConversation = true;
+      }
     }
 
-    // 3) If conversation previously deleted by sender → remove from deletedBy
-    if (conversation && conversation.deletedBy?.includes(sender)) {
+    const isGroup = !!conversation.isGroup;
+
+    // 💥 PATCH FIX #1 — Correct receiver BEFORE restore logic
+    if (!isGroup) {
+      const friend = conversation.participants.find(
+        (p) => p._id.toString() !== sender
+      );
+      receiver = friend?._id?.toString();
+    }
+
+    // ================================
+    // AUTO RESTORE LOGIC (Telegram-style)
+    // ================================
+    if (!isGroup && receiver && conversation.deletedBy?.includes(receiver)) {
+      conversation.deletedBy = conversation.deletedBy.filter(
+        (id) => id.toString() !== receiver
+      );
+      await conversation.save();
+
+      // Send restore event to A
+      emitToUser(receiver, "conversationRestored", conversation.toObject());
+    }
+
+    // Remove deletedBy for sender also (sender re-opens chat)
+    if (conversation.deletedBy?.includes(sender)) {
       conversation.deletedBy = conversation.deletedBy.filter(
         (id) => id.toString() !== sender
       );
       await conversation.save();
     }
 
-    const isNewConversation = !conversation;
-
-    // 4) Create new conversation if needed
-    if (!conversation) {
-      conversation = await Conversation.create({
-        isGroup: false,
-        participants: [sender, receiver],
-      });
-      conversation = await conversation.populate(
-        "participants",
-        "username profilePic name updatedAt"
-      );
-    }
-
-    // 5) Upload attachments to Cloudinary
+    // Upload attachments
     const attachments = await uploadAttachments(files);
 
-    // 6) Create message
+    // Create message
     const newMessage = await Message.create({
       conversationId: conversation._id,
-      sender: sender,
+      sender,
+      receiver,
       text: message || "",
       attachments,
       seenBy: [sender],
+      messageType: "text",
+      replyTo: replyTo || null,
     });
 
-    // 7) Update conversation.lastMessage
+    // Update lastMessage
     const lastText = resolveLastMessageText(message, attachments);
-
     conversation.lastMessage = {
+      _id: newMessage._id,
       text: lastText,
-      sender: sender,
+      sender,
       seenBy: [sender],
       updatedAt: new Date(),
+      callInfo: null,
     };
     await conversation.save();
 
-    // 8) Emit socket events
-    // - emit ONLY to receiver for "newMessage"
-    emitToUser(receiver, "newMessage", newMessage);
+    // Emit message
+    if (isGroup) {
+      conversation.participants.forEach((uid) => {
+        const id = uid._id?.toString?.() || uid.toString();
+        if (id === sender) return;
+        emitToUser(id, "newMessage", newMessage);
+      });
+    } else {
+      emitToUser(receiver, "newMessage", newMessage);
 
-    // - if this is a brand new conversation, notify both sides
-    if (isNewConversation) {
-      const convPayload = conversation.toObject();
-
-      emitToUser(receiver, "conversationCreated", convPayload);
-      emitToUser(sender, "conversationCreated", convPayload);
+      if (isNewConversation) {
+        const obj = conversation.toObject();
+        emitToUser(receiver, "conversationCreated", obj);
+        emitToUser(sender, "conversationCreated", obj);
+      }
     }
 
     return newMessage;
   } catch (err) {
     console.error("Send Message Error:", err);
-    if (files?.length) {
-      for (const f of files) {
-        try {
-          if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
-        } catch {}
-      }
-    }
+
+    // Clean temp files
+    files?.forEach((f) => {
+      try {
+        if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
+      } catch {}
+    });
     throw err;
   }
 };
-
 // -----------------------------
-// GET MESSAGES
+// GET MESSAGES (with pagination + signed URLs)
 // -----------------------------
-const getMessages = async ({ conversationId, userId }) => {
+const getMessages = async ({ conversationId, userId, skip = 0, limit = 50 }) => {
   try {
+    const numericSkip = Number(skip) || 0;
+    const numericLimit = Number(limit) || 50;
+    const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
+
     const messages = await Message.find({
       conversationId,
       deletedBy: { $ne: userId },
-    }).sort({ createdAt: 1 });
+    })
+      .sort({ createdAt: -1 })
+      .skip(numericSkip)
+      .limit(numericLimit)
+      .populate("replyTo");
+
+    // Attach signed URLs for private attachments
+    for (const msg of messages) {
+      if (!msg.attachments || !msg.attachments.length) continue;
+
+      msg.attachments.forEach((att) => {
+        if (
+          att &&
+          att.public_id &&
+          att.cloudinary_type === "authenticated" &&
+          !att.signedUrl
+        ) {
+          try {
+            if (att.resource_type === "raw") {
+              att.signedUrl = cloudinary.utils.private_download_url(
+                att.public_id,
+                att.format || "bin",
+                {
+                  resource_type: "raw",
+                  type: "authenticated",
+                  secure: true,
+                  sign_url: true,
+                  expires_at: expiresAt,
+                }
+              );
+            } else {
+              att.signedUrl = cloudinary.url(att.public_id, {
+                resource_type: att.resource_type || "video",
+                type: "authenticated",
+                secure: true,
+                sign_url: true,
+                expires_at: expiresAt,
+                format: att.format || undefined,
+              });
+            }
+          } catch (e) {
+            console.error("Signed URL build failed:", e?.message);
+          }
+        }
+      });
+    }
 
     return messages;
   } catch (error) {
@@ -240,17 +349,39 @@ const getMessages = async ({ conversationId, userId }) => {
 };
 
 // -----------------------------
-// GET CONVERSATIONS (with unreadCount)
+// Search messages in a conversation
+// -----------------------------
+const searchMessages = async ({ conversationId, userId, text }) => {
+  try {
+    if (!text || !text.trim()) return [];
+
+    const messages = await Message.find({
+      conversationId,
+      deletedBy: { $ne: userId },
+      text: { $regex: text, $options: "i" },
+    })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .populate("replyTo");
+
+    return messages;
+  } catch (error) {
+    console.error("Search Messages Error:", error);
+    throw error;
+  }
+};
+
+// -----------------------------
+// GET CONVERSATIONS (with unreadCount + online flag)
 // -----------------------------
 const getConversations = async (userId) => {
   try {
     const conversations = await Conversation.find({
       participants: userId,
       deletedBy: { $ne: userId },
-    }).populate(
-      "participants",
-      "username profilePic name updatedAt"
-    );
+    }).populate("participants", "username profilePic name updatedAt");
+
+    const onlineSet = new Set(getOnlineUserIds().map(String));
 
     const withUnread = await Promise.all(
       conversations.map(async (conv) => {
@@ -261,18 +392,23 @@ const getConversations = async (userId) => {
         });
 
         const doc = conv.toObject();
-        doc.unreadCount = unreadCount;
 
-        // direct chat ဖြစ်ရင် – UI အတွက် opposite user တစ်ယောက်ထဲ ပြန်ပေးမယ်
+        // decorate participants with online flag
+        let participants = (doc.participants || []).map((p) => ({
+          ...p,
+          online: onlineSet.has(String(p._id)),
+        }));
+
         if (!doc.isGroup) {
-          doc.participants = doc.participants.filter(
-            (p) => p._id.toString() !== userId.toString()
+          participants = participants.filter(
+            (p) => String(p._id) !== String(userId)
           );
         }
+        doc.participants = participants;
+        doc.unreadCount = unreadCount;
         return doc;
       })
     );
-
     return withUnread;
   } catch (err) {
     console.error("GetConversations Error:", err);
@@ -281,28 +417,46 @@ const getConversations = async (userId) => {
 };
 
 // -----------------------------
-// Group ops
+// Group ops (with admin checks)
 // -----------------------------
-const renameGroup = async ({ conversationId, name }) => {
+const renameGroup = async ({ conversationId, name, currentUserId }) => {
   try {
-    const updated = await Conversation.findByIdAndUpdate(
-      conversationId,
-      { name },
-      { new: true }
-    );
-    return updated;
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation || !conversation.isGroup) return null;
+
+    if (
+      conversation.admins.length &&
+      !conversation.admins
+        .map((id) => id.toString())
+        .includes(String(currentUserId))
+    ) {
+      throw new Error("Not allowed to rename group");
+    }
+
+    conversation.name = name;
+    await conversation.save();
+    return conversation;
   } catch (error) {
     console.error("Rename Group Error:", error);
     return null;
   }
 };
 
-const addToGroup = async ({ conversationId, userId }) => {
+const addToGroup = async ({ conversationId, userId, currentUserId }) => {
   try {
     const conversation = await Conversation.findById(conversationId);
     if (!conversation || !conversation.isGroup) return null;
 
-    if (!conversation.participants.includes(userId)) {
+    if (
+      conversation.admins.length &&
+      !conversation.admins
+        .map((id) => id.toString())
+        .includes(String(currentUserId))
+    ) {
+      throw new Error("Not allowed to add member");
+    }
+
+    if (!conversation.participants.map(String).includes(String(userId))) {
       conversation.participants.push(userId);
       await conversation.save();
     }
@@ -313,10 +467,19 @@ const addToGroup = async ({ conversationId, userId }) => {
   }
 };
 
-const removeFromGroup = async ({ conversationId, userId }) => {
+const removeFromGroup = async ({ conversationId, userId, currentUserId }) => {
   try {
     const conversation = await Conversation.findById(conversationId);
     if (!conversation || !conversation.isGroup) return null;
+
+    if (
+      conversation.admins.length &&
+      !conversation.admins
+        .map((id) => id.toString())
+        .includes(String(currentUserId))
+    ) {
+      throw new Error("Not allowed to remove member");
+    }
 
     conversation.participants = conversation.participants.filter(
       (id) => id.toString() !== String(userId)
@@ -379,17 +542,23 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
       const lastMessage = await Message.findOne({
         conversationId,
         deletedBy: { $ne: currentUserId },
-      }).sort({ createdAt: -1 });
+      })
+        .sort({ createdAt: -1 })
+        .lean();
 
       if (lastMessage) {
         conversation.lastMessage = {
+          _id: lastMessage._id,
           text: resolveLastMessageText(
             lastMessage.text,
-            lastMessage.attachments || []
+            lastMessage.attachments || [],
+            lastMessage.messageType,
+            lastMessage.callInfo
           ),
           sender: lastMessage.sender,
           seenBy: lastMessage.seenBy,
           updatedAt: lastMessage.updatedAt,
+          callInfo: lastMessage.callInfo || null,
         };
       } else {
         conversation.lastMessage = undefined;
@@ -454,10 +623,7 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
                   type: attachment.cloudinary_type,
                 });
               } catch (e) {
-                console.error(
-                  "Cloudinary delete failed:",
-                  e?.message
-                );
+                console.error("Cloudinary delete failed:", e?.message);
               }
             }
           }
@@ -467,10 +633,9 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
       await Message.deleteMany({ conversationId });
       await Conversation.findByIdAndDelete(conversationId);
 
-      io.to(String(conversationId)).emit(
-        "conversationPermanentlyDeleted",
-        { conversationId: String(conversationId) }
-      );
+      io.to(String(conversationId)).emit("conversationPermanentlyDeleted", {
+        conversationId: String(conversationId),
+      });
 
       return {
         permanentlyDeleted: true,
@@ -500,7 +665,9 @@ const updateMessage = async ({ messageId, newText, currentUserId }) => {
       throw new Error("You are not authorized to update this message.");
     }
 
-    message.text = newText;
+    const text = (newText ?? "").toString();
+
+    message.text = text;
     await message.save();
 
     // update conversation.lastMessage if this is latest message
@@ -512,12 +679,19 @@ const updateMessage = async ({ messageId, newText, currentUserId }) => {
     if (latest && String(latest._id) === String(messageId)) {
       await Conversation.findByIdAndUpdate(conversationId, {
         $set: {
-          "lastMessage.text": resolveLastMessageText(
-            newText,
-            message.attachments || []
-          ),
-          "lastMessage.sender": message.sender,
-          "lastMessage.updatedAt": new Date(),
+          lastMessage: {
+            _id: latest._id,
+            text: resolveLastMessageText(
+              latest.text,
+              latest.attachments || [],
+              latest.messageType,
+              latest.callInfo
+            ),
+            sender: latest.sender,
+            seenBy: latest.seenBy,
+            updatedAt: new Date(),
+            callInfo: latest.callInfo || null,
+          },
         },
       });
     }
@@ -526,7 +700,7 @@ const updateMessage = async ({ messageId, newText, currentUserId }) => {
     io.to(String(conversationId)).emit("messageUpdated", {
       conversationId: String(conversationId),
       messageId: String(messageId),
-      newText,
+      newText: message.text, //
     });
 
     return message;
@@ -539,11 +713,7 @@ const updateMessage = async ({ messageId, newText, currentUserId }) => {
 // -----------------------------
 // FORWARD MESSAGE
 // -----------------------------
-const forwardMessage = async ({
-  currentUserId,
-  messageId,
-  recipientIds,
-}) => {
+const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
   try {
     const originalMessage = await Message.findById(messageId);
     if (!originalMessage) throw new Error("Original message not found");
@@ -556,7 +726,7 @@ const forwardMessage = async ({
 
       let conversation = await Conversation.findOne({
         isGroup: false,
-        participants: { $all: [senderId, recipientId] },
+        participants: { $all: [senderId, recipientId], $size: 2 },
       }).populate("participants", "username profilePic name");
 
       const isNew = !conversation;
@@ -574,22 +744,30 @@ const forwardMessage = async ({
 
       const newMsg = await Message.create({
         sender: senderId,
+        receiver: recipientId,
         conversationId: conversation._id,
         text: originalMessage.text,
         attachments: originalMessage.attachments || [],
         seenBy: [senderId],
         isForwarded: true,
+        messageType: originalMessage.messageType,
+        callInfo: originalMessage.callInfo,
+        replyTo: originalMessage.replyTo || null,
       });
 
       const lastText = resolveLastMessageText(
         originalMessage.text,
-        originalMessage.attachments || []
+        originalMessage.attachments || [],
+        originalMessage.messageType,
+        originalMessage.callInfo
       );
       conversation.lastMessage = {
+        _id: newMsg._id,
         text: lastText,
         sender: senderId,
         seenBy: [senderId],
         updatedAt: new Date(),
+        callInfo: originalMessage.callInfo || null,
       };
       await conversation.save();
 
@@ -603,8 +781,6 @@ const forwardMessage = async ({
       }
 
       emitToUser(recipientId, "newMessage", newMsg);
-      // sender UI ကို HTTP response နဲ့ handle လုပ်နေပြီ ဆိုရင်
-      // 여기서 emitToUser(senderId, "newMessage", newMsg) မလိုပါ
     }
 
     return forwarded;
@@ -626,9 +802,7 @@ const deleteMessageForMe = async ({ messageId, currentUserId }) => {
     );
     if (!message) throw new Error("Message not found or update failed.");
 
-    const conversation = await Conversation.findById(
-      message.conversationId
-    );
+    const conversation = await Conversation.findById(message.conversationId);
     if (!conversation) {
       return { messageId, permanentlyDeleted: false };
     }
@@ -651,10 +825,7 @@ const deleteMessageForMe = async ({ messageId, currentUserId }) => {
                 type: attachment.cloudinary_type,
               });
             } catch (e) {
-              console.error(
-                "Cloudinary delete failed:",
-                e?.message
-              );
+              console.error("Cloudinary delete failed:", e?.message);
             }
           }
         }
@@ -707,6 +878,103 @@ const updateMessagesSeenStatus = async ({ conversationId, userId }) => {
   }
 };
 
+// -----------------------------
+// MESSAGE REACTIONS
+// -----------------------------
+const reactToMessage = async ({ messageId, userId, emoji }) => {
+  try {
+    const message = await Message.findById(messageId);
+    if (!message) throw new Error("Message not found");
+
+    const uid = String(userId);
+    let reactions = message.reactions || [];
+    const existingIndex = reactions.findIndex(
+      (r) => r.user.toString() === uid
+    );
+
+    if (!emoji || !emoji.trim()) {
+      // remove reaction
+      if (existingIndex !== -1) {
+        reactions.splice(existingIndex, 1);
+      }
+    } else if (existingIndex === -1) {
+      reactions.push({ user: uid, emoji });
+    } else {
+      reactions[existingIndex].emoji = emoji;
+    }
+
+    message.reactions = reactions;
+    await message.save();
+
+    io.to(String(message.conversationId)).emit("messageReactionUpdated", {
+      conversationId: String(message.conversationId),
+      messageId: String(message._id),
+      reactions: message.reactions,
+    });
+
+    return message;
+  } catch (error) {
+    console.error("reactToMessage Error:", error);
+    throw error;
+  }
+};
+
+// -----------------------------
+// PIN / UNPIN MESSAGES
+// -----------------------------
+const pinMessage = async ({ conversationId, messageId, userId }) => {
+  try {
+    const conv = await Conversation.findById(conversationId);
+    if (!conv) throw new Error("Conversation not found");
+
+    conv.pinnedMessages = conv.pinnedMessages || [];
+    const already = conv.pinnedMessages.find(
+      (p) => p.messageId.toString() === String(messageId)
+    );
+    if (!already) {
+      conv.pinnedMessages.push({
+        messageId,
+        pinnedBy: userId,
+        pinnedAt: new Date(),
+      });
+      await conv.save();
+    }
+
+    io.to(String(conversationId)).emit("messagePinned", {
+      conversationId: String(conversationId),
+      messageId: String(messageId),
+    });
+
+    return conv;
+  } catch (error) {
+    console.error("pinMessage Error:", error);
+    throw error;
+  }
+};
+
+const unpinMessage = async ({ conversationId, messageId }) => {
+  try {
+    const conv = await Conversation.findById(conversationId);
+    if (!conv) throw new Error("Conversation not found");
+
+    conv.pinnedMessages =
+      conv.pinnedMessages?.filter(
+        (p) => p.messageId.toString() !== String(messageId)
+      ) || [];
+    await conv.save();
+
+    io.to(String(conversationId)).emit("messageUnpinned", {
+      conversationId: String(conversationId),
+      messageId: String(messageId),
+    });
+
+    return conv;
+  } catch (error) {
+    console.error("unpinMessage Error:", error);
+    throw error;
+  }
+};
+
 module.exports = {
   sendMessage,
   findConversation,
@@ -722,4 +990,8 @@ module.exports = {
   forwardMessage,
   deleteMessageForMe,
   updateMessagesSeenStatus,
+  reactToMessage,
+  pinMessage,
+  unpinMessage,
+  searchMessages,
 };
