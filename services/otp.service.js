@@ -2,7 +2,7 @@ const Otp = require("../models/otp.model");
 
 const generateAndSaveOTP = async (email, userData) => {
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 20 * 60 * 1000); // 20 min
+  const expiresAt = new Date(Date.now() + 1 * 60 * 1000); // 20 min
 
   await Otp.findOneAndUpdate(
     { email },

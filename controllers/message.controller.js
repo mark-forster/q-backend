@@ -156,9 +156,32 @@ const removeFromGroup = catchAsync(async (req, res, next) => {
     .json({ message: "Member removed successfully", data: result });
 });
 
+const leaveGroup = catchAsync(async (req, res) => {
+  const { conversationId } = req.body;
+  const userId = req.user._id;
+
+  if (!conversationId) {
+    return res.status(400).json({
+      message: "Conversation ID is required",
+    });
+  }
+
+  const result = await messageService.leaveGroup({
+    conversationId,
+    userId,
+  });
+
+  res.status(200).json({
+    message: "Left group successfully",
+    data: result,
+  });
+});
+
+
+
 const deleteMessage = catchAsync(async (req, res, next) => {
   const { messageId } = req.params;
-  const { deleteForEveryone } = req.query; // kept for compatibility
+  const { deleteForEveryone } = req.query; 
   const currentUserId = req.user._id;
 
   const result = await messageService.deleteMessage({
@@ -440,6 +463,7 @@ module.exports = {
   renameGroup,
   addToGroup,
   removeFromGroup,
+  leaveGroup,
   deleteMessage,
   deleteConversation,
   updateMessage,

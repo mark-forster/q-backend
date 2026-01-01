@@ -4,6 +4,16 @@ const ApiError = require("../config/apiError");
 const httpStatus = require("http-status");
 const otpService = require("./otp.service");
 const { sendOTP } = require("../util/sendMail");
+const getCookieOptions = () => {
+  const isProd = process.env.NODE_ENV === "production";
+
+  return {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? "None" : "Lax",
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  };
+};
 
 const register = async (data) => {
   const user = await User.create(data);
@@ -12,13 +22,10 @@ const register = async (data) => {
   user.refreshToken = refreshToken;
   await user.save();
 
-  const options = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "Strict",
-  };
+  const cookieOptions = getCookieOptions();
 
-  return { user, accessToken, refreshToken, options };
+
+  return { user, accessToken, refreshToken, options: cookieOptions };
 };
 
 const login = async (data) => {
@@ -35,25 +42,19 @@ const login = async (data) => {
   await user.save();
 
   const loginUser = await User.findById(user._id).select("-password");
-  const options = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "Strict",
-  };
+const cookieOptions = getCookieOptions();
 
-  return { user: loginUser, accessToken, refreshToken, options };
+
+  return { user: loginUser, accessToken, refreshToken, options: cookieOptions };
 };
 
 const logout = async (user_id) => {
   await User.findByIdAndUpdate(user_id, { $unset: { refreshToken: 1 } });
 
-  const options = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "Strict",
-  };
+ const cookieOptions = getCookieOptions();
 
-  return { options };
+
+  return { options: cookieOptions };
 };
 
 const refreshAccessToken = async (refreshToken) => {
@@ -78,13 +79,10 @@ const refreshAccessToken = async (refreshToken) => {
   user.refreshToken = newRefreshToken;
   await user.save();
 
-  const options = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "Strict",
-  };
+ const cookieOptions = getCookieOptions();
 
-  return { accessToken: newAccessToken, refreshToken: newRefreshToken, options };
+
+  return { accessToken: newAccessToken, refreshToken: newRefreshToken, options: cookieOptions };
 };
 
 const emailLogin = async (body) => {
@@ -110,14 +108,9 @@ const verifyOtpAndRegister = async (body) => {
   user.refreshToken = refreshToken;
   await user.save();
   await otpService.clearOTP(email);
+const cookieOptions = getCookieOptions();
 
-  const options = {
-    httpOnly: true,
-    secure: true,
-    sameSite: "Strict",
-  };
-
-  return { user, accessToken, refreshToken, options };
+  return { user, accessToken, refreshToken, options: cookieOptions };
 };
 
 module.exports = {

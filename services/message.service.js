@@ -5,6 +5,21 @@ const { io, getRecipientSocketIds, getOnlineUserIds } = require("../socket/socke
 const cloudinary = require("cloudinary").v2;
 const fs = require("fs");
 
+// Helper Fuctions
+
+function buildConversationPreview(conversation) {
+  return {
+    _id: conversation._id,
+    isGroup: conversation.isGroup,
+    name: conversation.name || null,
+    lastMessage: conversation.lastMessage,
+    updatedAt: conversation.lastMessage?.updatedAt || new Date(),
+  };
+}
+
+
+
+
 // -----------------------------
 // Group Chat Helpers
 // -----------------------------
@@ -164,7 +179,9 @@ const sendMessage = async ({
     let conversation = null;
     let isNewConversation = false;
 
-    // 1) Try find by conversationId
+    // --------------------------------------------------
+    // 1️⃣ Find conversation
+    // --------------------------------------------------
     if (conversationId) {
       conversation = await Conversation.findById(conversationId).populate(
         "participants",
@@ -172,9 +189,8 @@ const sendMessage = async ({
       );
     }
 
-    // 2) If no conversation → create/find DM
     if (!conversation) {
-      if (!receiver) throw new Error("recipientId required for new conversation");
+      if (!receiver) throw new Error("recipientId required");
 
       conversation = await Conversation.findOne({
         isGroup: false,
@@ -196,7 +212,9 @@ const sendMessage = async ({
 
     const isGroup = !!conversation.isGroup;
 
-    // 💥 PATCH FIX #1 — Correct receiver BEFORE restore logic
+    // --------------------------------------------------
+    // 2️⃣ Fix receiver for DM
+    // --------------------------------------------------
     if (!isGroup) {
       const friend = conversation.participants.find(
         (p) => p._id.toString() !== sender
@@ -204,20 +222,17 @@ const sendMessage = async ({
       receiver = friend?._id?.toString();
     }
 
-    // ================================
-    // AUTO RESTORE LOGIC (Telegram-style)
-    // ================================
+    // --------------------------------------------------
+    // 3️⃣ AUTO RESTORE (Telegram-style)
+    // --------------------------------------------------
     if (!isGroup && receiver && conversation.deletedBy?.includes(receiver)) {
       conversation.deletedBy = conversation.deletedBy.filter(
         (id) => id.toString() !== receiver
       );
       await conversation.save();
-
-      // Send restore event to A
       emitToUser(receiver, "conversationRestored", conversation.toObject());
     }
 
-    // Remove deletedBy for sender also (sender re-opens chat)
     if (conversation.deletedBy?.includes(sender)) {
       conversation.deletedBy = conversation.deletedBy.filter(
         (id) => id.toString() !== sender
@@ -225,10 +240,14 @@ const sendMessage = async ({
       await conversation.save();
     }
 
-    // Upload attachments
+    // --------------------------------------------------
+    // 4️⃣ Upload attachments  ✅ (THIS WAS MISSING)
+    // --------------------------------------------------
     const attachments = await uploadAttachments(files);
 
-    // Create message
+    // --------------------------------------------------
+    // 5️⃣ Create message
+    // --------------------------------------------------
     const newMessage = await Message.create({
       conversationId: conversation._id,
       sender,
@@ -239,9 +258,18 @@ const sendMessage = async ({
       messageType: "text",
       replyTo: replyTo || null,
     });
+await newMessage.populate("sender", "name username profilePic");
 
-    // Update lastMessage
-    const lastText = resolveLastMessageText(message, attachments);
+    // --------------------------------------------------
+    // 6️⃣ Update conversation.lastMessage (smart text)
+    // --------------------------------------------------
+    const lastText = resolveLastMessageText(
+      message,
+      attachments,
+      "text",
+      null
+    );
+
     conversation.lastMessage = {
       _id: newMessage._id,
       text: lastText,
@@ -250,17 +278,29 @@ const sendMessage = async ({
       updatedAt: new Date(),
       callInfo: null,
     };
+
     await conversation.save();
 
-    // Emit message
+    // --------------------------------------------------
+    // 7️⃣ 🔥 NEW: conversationUpdated (list-level realtime)
+    // --------------------------------------------------
+    const preview = buildConversationPreview(conversation);
+    conversation.participants.forEach((uid) => {
+      const id = uid._id?.toString?.() || uid.toString();
+      emitToUser(id, "conversationUpdated", preview);
+    });
+
+    // --------------------------------------------------
+    // 8️⃣ Emit newMessage (message-level realtime)
+    // --------------------------------------------------
     if (isGroup) {
       conversation.participants.forEach((uid) => {
         const id = uid._id?.toString?.() || uid.toString();
-        if (id === sender) return;
         emitToUser(id, "newMessage", newMessage);
       });
     } else {
       emitToUser(receiver, "newMessage", newMessage);
+      // emitToUser(sender, "newMessage", newMessage);
 
       if (isNewConversation) {
         const obj = conversation.toObject();
@@ -273,15 +313,17 @@ const sendMessage = async ({
   } catch (err) {
     console.error("Send Message Error:", err);
 
-    // Clean temp files
+    // cleanup temp files
     files?.forEach((f) => {
       try {
         if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
       } catch {}
     });
+
     throw err;
   }
 };
+
 // -----------------------------
 // GET MESSAGES (with pagination + signed URLs)
 // -----------------------------
@@ -298,7 +340,9 @@ const getMessages = async ({ conversationId, userId, skip = 0, limit = 50 }) => 
       .sort({ createdAt: -1 })
       .skip(numericSkip)
       .limit(numericLimit)
-      .populate("replyTo");
+       .populate("sender", "name username profilePic")
+      .populate("replyTo") 
+;
 
     // Attach signed URLs for private attachments
     for (const msg of messages) {
@@ -491,6 +535,61 @@ const removeFromGroup = async ({ conversationId, userId, currentUserId }) => {
     return null;
   }
 };
+
+const leaveGroup = async ({ conversationId, userId }) => {
+  try {
+    const uid = String(userId);
+
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation || !conversation.isGroup) {
+      throw new Error("Group not found");
+    }
+
+    // user must be participant
+    if (!conversation.participants.map(String).includes(uid)) {
+      throw new Error("You are not a participant of this group");
+    }
+
+    // remove from participants
+    conversation.participants = conversation.participants.filter(
+      (id) => id.toString() !== uid
+    );
+
+    //  remove from admins if admin
+    if (conversation.admins?.length) {
+      conversation.admins = conversation.admins.filter(
+        (id) => id.toString() !== uid
+      );
+    }
+
+    // if no admin left → promote first participant
+    if (
+      conversation.admins.length === 0 &&
+      conversation.participants.length > 0
+    ) {
+      conversation.admins = [conversation.participants[0]];
+    }
+
+    await conversation.save();
+
+    const convObj = conversation.toObject();
+
+    // socket notify remaining members
+    conversation.participants.forEach((pid) => {
+      emitToUser(pid.toString(), "memberLeftGroup", {
+        conversationId: conversationId,
+        userId: uid,
+      });
+    });
+
+    return convObj;
+  } catch (error) {
+    console.error("Leave Group Error:", error);
+    throw error;
+  }
+};
+
+
 
 // -----------------------------
 // DELETE MESSAGE (for everyone)
@@ -984,6 +1083,7 @@ module.exports = {
   renameGroup,
   addToGroup,
   removeFromGroup,
+  leaveGroup,
   deleteMessage,
   deleteConversation,
   updateMessage,

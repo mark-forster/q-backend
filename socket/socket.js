@@ -1,5 +1,5 @@
 // ===============================================
-//  socket.js — STABLE VERSION (GROUP + SINGLE CALL FIXED)
+//  socket.js 
 // ===============================================
 const { Server } = require("socket.io");
 const http = require("http");
@@ -146,17 +146,69 @@ io.on("connection", async (socket) => {
   io.emit("getOnlineUsers", getOnlineUserIds());
 
   /* ------------ TYPING ------------ */
-  socket.on("typing", ({ conversationId }) => {
-    if (conversationId) {
-      io.to(String(conversationId)).emit("typing", { conversationId, userId: uid });
-    }
+  socket.on("typing", async ({ conversationId }) => {
+  if (!conversationId) return;
+
+  io.to(String(conversationId)).emit("typing", {
+    conversationId,
+    userId: uid,
   });
 
-  socket.on("stopTyping", ({ conversationId }) => {
-    if (conversationId) {
-      io.to(String(conversationId)).emit("stopTyping", { conversationId, userId: uid });
+  const conv = await Conversation.findById(conversationId).select("participants isGroup");
+  if (!conv || conv.isGroup) return;
+
+  conv.participants.forEach((pid) => {
+    const id = String(pid);
+    if (id !== uid) {
+      getRecipientSocketIds(id).forEach((sid) =>
+        io.to(sid).emit("typing", { conversationId, userId: uid })
+      );
     }
   });
+});
+
+socket.on("stopTyping", async ({ conversationId }) => {
+  if (!conversationId) return;
+
+  io.to(String(conversationId)).emit("stopTyping", {
+    conversationId,
+    userId: uid,
+  });
+  const conv = await Conversation.findById(conversationId).select("participants isGroup");
+  if (!conv || conv.isGroup) return;
+
+  conv.participants.forEach((pid) => {
+    const id = String(pid);
+    if (id !== uid) {
+      getRecipientSocketIds(id).forEach((sid) =>
+        io.to(sid).emit("stopTyping", { conversationId, userId: uid })
+      );
+    }
+  });
+});
+
+// ==============================
+// VOICE RECORDING STATUS
+// ==============================
+socket.on("recording", ({ conversationId }) => {
+  if (!conversationId) return;
+
+  io.to(String(conversationId)).emit("recording", {
+    conversationId,
+    userId: uid,
+  });
+});
+
+socket.on("stopRecording", ({ conversationId }) => {
+  if (!conversationId) return;
+
+  io.to(String(conversationId)).emit("stopRecording", {
+    conversationId,
+    userId: uid,
+  });
+});
+
+
 
   /* ---------------------------------------------------
      CALL USER (Group + Single)
@@ -224,18 +276,34 @@ io.on("connection", async (socket) => {
         await finalizeCall(roomID, "timeout");
 
         const callerId = call.caller;
-        for (const rid of call.participants) {
-          if (rid === callerId) continue;
+
+        if (call.isGroup) {
+          // GROUP → single message
           await createCallMessage({
             sender: callerId,
-            receiver: call.isGroup ? null : rid,
+            receiver: null,
             callType,
             status: "missed",
             duration: 0,
             io,
-            isGroup: call.isGroup,
+            isGroup: true,
             conversationId: call.conversationId || null,
           });
+        } else {
+          // SINGLE → participant message
+          for (const rid of call.participants) {
+            if (rid === callerId) continue;
+            await createCallMessage({
+              sender: callerId,
+              receiver: rid,
+              callType,
+              status: "missed",
+              duration: 0,
+              io,
+              isGroup: false,
+              conversationId: call.conversationId || null,
+            });
+          }
         }
       }, CALL_TIMEOUT_MS);
 
@@ -248,26 +316,39 @@ io.on("connection", async (socket) => {
   /* ---------------------------------------------------
      ANSWER CALL
   --------------------------------------------------- */
-  socket.on("answerCall", ({ roomID }) => {
-    const call = activeCalls.get(roomID);
-    if (!call) return;
+socket.on("answerCall", ({ roomID }) => {
+  const call = activeCalls.get(roomID);
+  if (!call) return;
 
-    call.status = "in-call";
-    if (!call.startedAt) call.startedAt = new Date();
+  // ⭐ ပထမဆုံး accept လား စစ်
+  const isFirstAccept = call.status === "ringing";
 
+  call.status = "in-call";
+  if (!call.startedAt) call.startedAt = new Date();
+
+  // 🔥 FIRST ACCEPT → CALL STARTED
+  if (isFirstAccept) {
     call.participants.forEach((uidInCall) => {
       getRecipientSocketIds(uidInCall).forEach((sid) =>
-        io.to(sid).emit("callAccepted", { roomID })
-      );
-
-      getRecipientSocketIds(uidInCall).forEach((sid) =>
-        io.to(sid).emit("groupCallParticipantJoined", {
+        io.to(sid).emit("callStarted", {
           roomID,
-          userId: uid,
+          startedBy: uid, // who accepted first
         })
       );
     });
+  }
+
+  // 🔁 participant joined (UI update only)
+  call.participants.forEach((uidInCall) => {
+    getRecipientSocketIds(uidInCall).forEach((sid) =>
+      io.to(sid).emit("groupCallParticipantJoined", {
+        roomID,
+        userId: uid,
+      })
+    );
   });
+});
+
 
   /* ---------------------------------------------------
      REJECT CALL
@@ -280,18 +361,13 @@ io.on("connection", async (socket) => {
       const rejecterId = uid;
       const callerId = call.caller;
 
-      // Remove rejecter
       call.participants = call.participants.filter((u) => u !== rejecterId);
 
-      // SINGLE CALL → notify caller
       if (!call.isGroup) {
         getRecipientSocketIds(to).forEach((sid) =>
           io.to(sid).emit("callRejected", { roomID })
         );
-      }
-
-      // GROUP CALL → notify participants only
-      if (call.isGroup) {
+      } else {
         call.participants.forEach((uidInCall) => {
           getRecipientSocketIds(uidInCall).forEach((sid) =>
             io.to(sid).emit("groupCallParticipantLeft", {
@@ -302,22 +378,34 @@ io.on("connection", async (socket) => {
         });
       }
 
-      // End call if no one left except caller
       if (call.participants.length <= 1) {
         await finalizeCall(roomID, "declined");
       }
 
-      // Message log
-      await createCallMessage({
-        sender: callerId,
-        receiver: call.isGroup ? null : rejecterId,
-        callType: call.callType,
-        status: "declined",
-        duration: 0,
-        io,
-        isGroup: call.isGroup,
-        conversationId: call.conversationId || null,
-      });
+      // MESSAGE LOG → single for group
+      if (call.isGroup) {
+        await createCallMessage({
+          sender: callerId,
+          receiver: null,
+          callType: call.callType,
+          status: "declined",
+          duration: 0,
+          io,
+          isGroup: true,
+          conversationId: call.conversationId || null,
+        });
+      } else {
+        await createCallMessage({
+          sender: callerId,
+          receiver: rejecterId,
+          callType: call.callType,
+          status: "declined",
+          duration: 0,
+          io,
+          isGroup: false,
+          conversationId: call.conversationId || null,
+        });
+      }
 
     } catch (err) {
       console.error("callRejected:", err.message);
@@ -333,34 +421,44 @@ io.on("connection", async (socket) => {
       if (!call) return;
 
       const callerId = call.caller;
-
       const t = callTimeoutMap.get(roomID);
       if (t) clearTimeout(t);
       callTimeoutMap.delete(roomID);
 
       const others = call.participants.filter((u) => u !== callerId);
-
       await finalizeCall(roomID, "canceled");
 
-      // Notify receivers
       others.forEach((rid) => {
         getRecipientSocketIds(rid).forEach((sid) =>
           io.to(sid).emit("callCanceled", { roomID })
         );
       });
 
-      // Message log
-      for (const rid of others) {
+      // MESSAGE LOG
+      if (call.isGroup) {
         await createCallMessage({
           sender: callerId,
-          receiver: call.isGroup ? null : rid,
+          receiver: null,
           callType: call.callType,
           status: "canceled",
           duration: 0,
           io,
-          isGroup: call.isGroup,
+          isGroup: true,
           conversationId: call.conversationId || null,
         });
+      } else {
+        for (const rid of others) {
+          await createCallMessage({
+            sender: callerId,
+            receiver: rid,
+            callType: call.callType,
+            status: "canceled",
+            duration: 0,
+            io,
+            isGroup: false,
+            conversationId: call.conversationId || null,
+          });
+        }
       }
 
     } catch (err) {
@@ -371,76 +469,81 @@ io.on("connection", async (socket) => {
   /* ---------------------------------------------------
      END CALL
   --------------------------------------------------- */
-  socket.on("endCall", async ({ roomID }) => {
-    try {
-      const call = activeCalls.get(roomID);
-      if (!call) return;
+ socket.on("endCall", async ({ roomID }) => {
+  try {
+    const call = activeCalls.get(roomID);
+    if (!call) return;
 
-      const ender = uid;
-      const callerId = call.caller;
-      const before = [...call.participants];
+    const leaver = uid;
 
-      const end = new Date();
-      const duration = call.startedAt
-        ? Math.round((end - call.startedAt) / 1000)
-        : 0;
+    // 1️⃣ leave user ကို participants ထဲက ဖယ်
+    call.participants = call.participants.filter(
+      (u) => String(u) !== String(leaver)
+    );
 
-      let callEndedNow = false;
+    // 2️⃣ ကျန်တဲ့သူတွေကို "user left" notify
+    call.participants.forEach((pid) => {
+      getRecipientSocketIds(pid).forEach((sid) =>
+        io.to(sid).emit("groupCallParticipantLeft", {
+          roomID,
+          userId: leaver,
+        })
+      );
+    });
 
-      // Caller ended call → force end
-      if (ender === callerId) {
-        await finalizeCall(roomID, "completed");
-        callEndedNow = true;
-
-      } else {
-        // Participant left
-        call.participants = call.participants.filter((u) => u !== ender);
-
-        // Notify remaining group callers
-        call.participants.forEach((uidInCall) => {
-          getRecipientSocketIds(uidInCall).forEach((sid) =>
-            io.to(sid).emit("groupCallParticipantLeft", {
-              roomID,
-              userId: ender,
-            })
-          );
-        });
-
-        // If only caller left → end call
-        if (call.participants.length <= 1) {
-          await finalizeCall(roomID, "completed");
-          callEndedNow = true;
-
-        } else {
-          // Only remove UI for leaver
-          getRecipientSocketIds(ender).forEach((sid) =>
-            io.to(sid).emit("callEnded", { roomID })
-          );
-        }
-      }
-
-      // Add call message log
-      if (callEndedNow) {
-        const others = before.filter((u) => u !== callerId);
-
-        for (const rid of others) {
-          await createCallMessage({
-            sender: callerId,
-            receiver: call.isGroup ? null : rid,
-            callType: call.callType,
-            status: "completed",
-            duration,
-            io,
-            isGroup: call.isGroup,
-            conversationId: call.conversationId || null,
-          });
-        }
-      }
-
-    } catch (err) {
-      console.error("endCall:", err.message);
+    // 3️⃣ Room ထဲ လူ ၁ ယောက်ပဲကျန်ရင် → call end
+    if (call.participants.length <= 1) {
+      await finalizeCall(roomID, "completed");
+      call.participants.forEach((uidInCall) => {
+  getRecipientSocketIds(uidInCall).forEach((sid) =>
+    io.to(sid).emit("roomEnded", { roomID })
+  );
+});
+    } else {
+      // 4️⃣ leave လုပ်တဲ့ user ကိုပဲ call window ပိတ်
+      getRecipientSocketIds(leaver).forEach((sid) =>
+        io.to(sid).emit("callEnded", { roomID })
+      );
     }
+  } catch (err) {
+    console.error("endCall:", err.message);
+  }
+});
+
+// Rejoin Call
+socket.on("rejoinCall", ({ roomID }) => {
+  const call = activeCalls.get(roomID);
+  if (!call) return;
+
+  // call မပြီးသေးရင်ပဲ rejoin ခွင့်ပေး
+  if (call.participants.length === 0) return;
+
+  // already joined မဖြစ်အောင်
+  if (!call.participants.includes(uid)) {
+    call.participants.push(uid);
+  }
+
+  // others ကို notify
+  call.participants.forEach((pid) => {
+    getRecipientSocketIds(pid).forEach((sid) =>
+      io.to(sid).emit("groupCallParticipantJoined", {
+        roomID,
+        userId: uid,
+        rejoin: true,
+      })
+    );
   });
+
+  // rejoiner ကို confirm
+  getRecipientSocketIds(uid).forEach((sid) =>
+    io.to(sid).emit("callRejoined", {
+      roomID,
+      callType: call.callType,
+    })
+  );
+});
+
+
 
   /* ------------ DISCONNECT ------------ */
   socket.on("disconnect", () => {
