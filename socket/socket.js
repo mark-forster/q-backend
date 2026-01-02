@@ -72,6 +72,7 @@ async function finalizeCall(roomID, reason) {
   const end = new Date();
   const duration = startedAt ? Math.round((end - startedAt) / 1000) : 0;
 
+  // 1️⃣ CallLog update
   await CallLog.findOneAndUpdate(
     { roomID },
     {
@@ -83,18 +84,39 @@ async function finalizeCall(roomID, reason) {
     { new: true }
   );
 
-  participants.forEach((uid) => {
-    getRecipientSocketIds(uid).forEach((sid) =>
-      io.to(sid).emit("callEnded", { roomID })
-    );
-  });
+  // 2️⃣ ✅ GROUP CALL END MESSAGE (ဒီနေရာမှာပဲ ရေးရမယ်)
+  if (call.isGroup && call.conversationId) {
+    await createCallMessage({
+      sender: call.caller,
+      receiver: null,
+      callType: call.callType,
+      status: "completed",
+      duration,
+      io,
+      isGroup: true,
+      conversationId: call.conversationId,
+    });
+  }
+participants.forEach((uid) => {
+  getRecipientSocketIds(uid).forEach((sid) =>
+    io.to(sid).emit("callEnded", { roomID })
+  );
+});
 
-  activeCalls.delete(roomID);
+if (call.isGroup && call.conversationId) {
+  io.to(String(call.conversationId)).emit("roomEnded", {
+    roomID,
+    conversationId: call.conversationId,
+  });
+}
+
+activeCalls.delete(roomID);
 
   const t = callTimeoutMap.get(roomID);
   if (t) clearTimeout(t);
   callTimeoutMap.delete(roomID);
 }
+
 
 /* ---------------------------------------------------
    Init IO
@@ -236,6 +258,16 @@ socket.on("stopRecording", ({ conversationId }) => {
           isGroup: true,
           conversationId,
         });
+        await createCallMessage({
+  sender: from,
+  receiver: null,
+  callType,
+  status: "started",
+  duration: 0,
+  io,
+  isGroup: true,
+  conversationId,
+});
 
       } else {
         // SINGLE CALL
@@ -489,7 +521,7 @@ socket.on("answerCall", ({ roomID }) => {
           userId: leaver,
         })
       );
-    });
+    }); 
 
     // 3️⃣ Room ထဲ လူ ၁ ယောက်ပဲကျန်ရင် → call end
     if (call.participants.length <= 1) {
