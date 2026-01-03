@@ -23,25 +23,26 @@ module.exports.createCallMessage = async ({
 }) => {
   try {
     let conversation;
-    if (isGroup && conversationId) {
-      conversation = await Conversation.findById(conversationId);
-      if (!conversation) return;
-    } else {
-      const senderId = new mongoose.Types.ObjectId(String(sender));
-      const receiverId = new mongoose.Types.ObjectId(String(receiver));
+if (conversationId) {
+  conversation = await Conversation.findById(conversationId);
+  if (!conversation) return;
+}
+else if (!isGroup) {
+  const senderId = new mongoose.Types.ObjectId(String(sender));
+  const receiverId = new mongoose.Types.ObjectId(String(receiver));
 
-      conversation = await Conversation.findOne({
-        participants: { $all: [senderId, receiverId] },
-        isGroup: false,
-      });
+  conversation = await Conversation.findOne({
+    participants: { $all: [senderId, receiverId] },
+    isGroup: false,
+  });
 
-      if (!conversation) {
-        conversation = await Conversation.create({
-          participants: [senderId, receiverId],
-          isGroup: false,
-        });
-      }
-    }
+  if (!conversation) {
+    conversation = await Conversation.create({
+      participants: [senderId, receiverId],
+      isGroup: false,
+    });
+  }
+}
     const callInfo = { callType, status, duration };
     const previewText = callPreviewText(callType, status);
 
