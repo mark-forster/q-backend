@@ -91,10 +91,20 @@ const conversationSchema = new mongoose.Schema(
     // Soft delete: who deleted this conversation
     deletedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
 
-    // ✅ Pinned messages
+    // Pinned messages
     pinnedMessages: {
       type: [pinnedMessageSchema],
       default: [],
+    },
+    hasActiveCall: {
+      type: Boolean,
+      default: false,
+    },
+
+    activeCallType: {
+      type: String,
+      enum: ["audio", "video"],
+      default: null,
     },
   },
   { timestamps: true }

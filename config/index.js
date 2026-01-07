@@ -74,7 +74,13 @@ const config = {
   zego: {
     appId: Number(required('ZEGO_APP_ID', process.env.ZEGO_APP_ID)),
     serverSecret: required('ZEGO_SERVER_SECRET', process.env.ZEGO_SERVER_SECRET),
-  }
+  },mail: {
+    provider: 'mailersend',
+    apiKey: required('MAILERSEND_API_KEY', process.env.MAILERSEND_API_KEY),
+    fromEmail: required('MAIL_FROM_EMAIL', process.env.MAIL_FROM_EMAIL),
+    fromName: process.env.MAIL_FROM_NAME || 'Arakkha Chat',
+  },
+ 
 };
 
 module.exports = { config };

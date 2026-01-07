@@ -293,12 +293,14 @@ await newMessage.populate("sender", "name username profilePic");
     // --------------------------------------------------
     // 8️⃣ Emit newMessage (message-level realtime)
     // --------------------------------------------------
-    if (isGroup) {
-      conversation.participants.forEach((uid) => {
-        const id = uid._id?.toString?.() || uid.toString();
-        emitToUser(id, "newMessage", newMessage);
-      });
-    } else {
+   if (isGroup) {
+  conversation.participants.forEach((uid) => {
+    const id = uid._id?.toString?.() || uid.toString();
+    if (id !== String(sender)) {
+      emitToUser(id, "newMessage", newMessage);
+    }
+  });
+} else {
       emitToUser(receiver, "newMessage", newMessage);
       // emitToUser(sender, "newMessage", newMessage);
 

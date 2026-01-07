@@ -87,11 +87,32 @@ const refreshAccessToken = async (refreshToken) => {
 
 const emailLogin = async (body) => {
   const { email, name, username, password } = body;
-  console.log(body);
-  const otp = await otpService.generateAndSaveOTP(email, { name, username, email, password });
-  await sendOTP(email, otp);
-  return { email };
+
+  try {
+    if (!email) {
+      throw new ApiError(httpStatus.BAD_REQUEST, "Email is required");
+    }
+
+    console.log("EMAIL LOGIN BODY =>", { email, name, username });
+
+    const otp = await otpService.generateAndSaveOTP(email, {
+      name,
+      username,
+      email,
+      password,
+    });
+
+    console.log("OTP GENERATED =>", otp);
+
+    await sendOTP(email, otp);
+
+    return { email };
+  } catch (err) {
+    console.error("EMAIL LOGIN ERROR =>", err);
+    throw err; // catchAsync က handle လုပ်စေ
+  }
 };
+
 
 const verifyOtpAndRegister = async (body) => {
   const { email, otp } = body;

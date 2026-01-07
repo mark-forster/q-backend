@@ -67,8 +67,6 @@ function removeUserSocket(socketId) {
 async function finalizeCall(roomID, reason) {
   const call = activeCalls.get(roomID);
   if (!call) return;
-
-  // originalParticipants မရှိလျှင် လက်ရှိ participants ကို backup ယူမည်
   const finalParticipants = call.originalParticipants || call.participants;
   const { startedAt } = call;
   const end = new Date();
