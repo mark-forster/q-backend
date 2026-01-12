@@ -1,24 +1,19 @@
-const { Server } = require("socket.io");
-const http = require("http");
-const express = require("express");
 const jwt = require("jsonwebtoken");
-const { createSystemMessage } = require("../helpers/createSystemMessage");
-
-const app = express();
-const server = http.createServer(app);
-
 const { config } = require("../config");
 const Conversation = require("../models/conversation.model");
 const CallLog = require("../models/callLog.model");
 const { createCallMessage } = require("../helpers/createCallMessage");
+const { reactToMessage } = require("../services/message.service");
+
+const {
+  getRecipientSocketIds,
+  getOnlineUserIds,
+  setUserSocket,
+  removeUserSocket,
+} = require("./socketState");
 
 const JWT_SECRET = config.jwt?.secret || process.env.JWT_SECRET;
 
-/* ---------------------------------------------------
-    SOCKET USER MAPS
---------------------------------------------------- */
-const userSocketMap = new Map();
-const socketToUserId = new Map();
 
 /* ---------------------------------------------------
     ACTIVE CALLS
@@ -27,38 +22,8 @@ const activeCalls = new Map();
 const callTimeoutMap = new Map();
 const CALL_TIMEOUT_MS = 30000;
 
-/* ---------------------------------------------------
-    Helpers
---------------------------------------------------- */
-function getRecipientSocketIds(userId) {
-  const set = userSocketMap.get(String(userId));
-  return set ? [...set] : [];
-}
 
-function getOnlineUserIds() {
-  return [...userSocketMap.keys()];
-}
-
-function setUserSocket(userId, socketId) {
-  const id = String(userId);
-  const set = userSocketMap.get(id) || new Set();
-  set.add(socketId);
-  userSocketMap.set(id, set);
-  socketToUserId.set(socketId, id);
-}
-
-function removeUserSocket(socketId) {
-  const uid = socketToUserId.get(socketId);
-  if (!uid) return;
-
-  const set = userSocketMap.get(uid);
-  if (set) {
-    set.delete(socketId);
-    if (set.size === 0) userSocketMap.delete(uid);
-  }
-  socketToUserId.delete(socketId);
-}
-
+module.exports = function registerSocket(io) {
 /* ---------------------------------------------------
     Finalize Call
 --------------------------------------------------- */
@@ -141,22 +106,10 @@ async function finalizeCall(roomID, reason) {
   callTimeoutMap.delete(roomID);
 }
 
-
-/* ---------------------------------------------------
-    Init IO
---------------------------------------------------- */
-const io = new Server(server, {
-  cors: {
-    origin: config.cors?.prodOrigins || "*",
-    methods: ["GET", "POST"],
-    credentials: true,
-  },
-  transports: ["websocket", "polling"],
-});
-
 /* ---------------------------------------------------
     ON SOCKET CONNECT
 --------------------------------------------------- */
+
 io.on("connection", async (socket) => {
   let userId = null;
 
@@ -190,6 +143,17 @@ io.on("connection", async (socket) => {
   } catch {}
 
   io.emit("getOnlineUsers", getOnlineUserIds());
+// ================================
+// MESSAGE REACTION SOCKET LISTENER
+// ================================
+socket.on("reactMessage", async ({ messageId, userId, emoji }) => {
+  try {
+    await reactToMessage({ messageId, userId, emoji });
+  } catch (err) {
+    console.error("Reaction socket error:", err.message);
+  }
+});
+
 
   /* ------------ TYPING ------------ */
   socket.on("typing", async ({ conversationId }) => {
@@ -687,13 +651,4 @@ io.on("connection", async (socket) => {
   });
 });
 
-/* ---------------------------------------------------
-    EXPORT
---------------------------------------------------- */
-module.exports = {
-  app,
-  server,
-  io,
-  getRecipientSocketIds,
-  getOnlineUserIds,
-};
+}

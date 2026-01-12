@@ -95,13 +95,15 @@ const emailLogin = async (body) => {
 
     console.log("EMAIL LOGIN BODY =>", { email, name, username });
 
-    const otp = await otpService.generateAndSaveOTP(email, {
-      name,
-      username,
-      email,
-      password,
-    });
-
+const otp = await otpService.generateAndSaveOTP(email, {
+  purpose: "REGISTER",
+  payload: {
+    name,
+    username,
+    email,
+    password
+  },
+});
     console.log("OTP GENERATED =>", otp);
 
     await sendOTP(email, otp);
@@ -116,23 +118,81 @@ const emailLogin = async (body) => {
 
 const verifyOtpAndRegister = async (body) => {
   const { email, otp } = body;
-  const userData = await otpService.verifyOTP(email, otp);
-  console.log(userData);
-  if (!userData) throw new ApiError(httpStatus.BAD_REQUEST, "Invalid or expired OTP");
+
+  const userData = await otpService.verifyOTP(email, otp, "REGISTER");
+
+  if (!userData || !userData.password) {
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      "Invalid or expired OTP. Please register again."
+    );
+  }
+console.log("OTP payload =>", userData);
 
   const existingUser = await User.findOne({ email });
-  if (existingUser) throw new ApiError(httpStatus.BAD_REQUEST, "User already exists");
+  if (existingUser) {
+    throw new ApiError(httpStatus.BAD_REQUEST, "User already exists");
+  }
 
-  const user = await User.create(userData);
+  const user = await User.create({
+    name: userData.name,
+    username: userData.username,
+    email: userData.email,
+    password: userData.password, // ✅ guaranteed exists
+  });
+
   const accessToken = user.generateAccessToken();
   const refreshToken = user.generateRefreshToken();
   user.refreshToken = refreshToken;
   await user.save();
-  await otpService.clearOTP(email);
-const cookieOptions = getCookieOptions();
 
-  return { user, accessToken, refreshToken, options: cookieOptions };
+  await otpService.clearOTP(email, "REGISTER");
+
+  return { user, accessToken, refreshToken, options: getCookieOptions() };
 };
+
+
+const forgotPassword = async ({ email }) => {
+  const user = await User.findOne({ email });
+
+  if (!user) return { email };
+
+  const otp = await otpService.generateAndSaveOTP(email, {
+    purpose: "RESET_PASSWORD",
+  });
+    console.log("OTP GENERATED =>", otp);
+
+  await sendOTP(email, otp);
+  return { email };
+};
+
+const verifyResetOtp = async ({ email, otp }) => {
+ const isValid = await otpService.verifyOTP(email, otp, "RESET_PASSWORD");
+
+if (!isValid) {
+  throw new ApiError(httpStatus.BAD_REQUEST, "Invalid or expired OTP");
+}
+ 
+
+  const resetToken = jwt.sign(
+    { email, purpose: "RESET_PASSWORD" },
+    process.env.JWT_TEMP_SECRET,
+    { expiresIn: "10m" }
+  );
+
+  return { resetToken, options: getCookieOptions() };
+};
+const resetPassword = async ({ email, newPassword }) => {
+  const user = await User.findOne({ email });
+  if (!user) throw new ApiError(404, "User not found");
+
+  user.password = newPassword; // bcrypt auto
+  user.refreshToken = "";      // logout all sessions
+  await user.save();
+
+await otpService.clearOTP(email, "RESET_PASSWORD");
+};
+
 
 module.exports = {
   register,
@@ -141,4 +201,7 @@ module.exports = {
   emailLogin,
   verifyOtpAndRegister,
   refreshAccessToken,
+  forgotPassword,
+  verifyResetOtp ,
+  resetPassword 
 };

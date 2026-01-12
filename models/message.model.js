@@ -134,6 +134,20 @@ const messageSchema = new mongoose.Schema(
     isRead: { type: Boolean, default: false },
 
     isForwarded: { type: Boolean, default: false },
+    forwardedFrom: {
+  kind: {
+    type: String,
+    enum: ["user"],
+    default: "user",
+  },
+  user: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+  },
+  name: String,
+  username: String,
+},
   },
   { timestamps: true }
 );

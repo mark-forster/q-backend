@@ -7,6 +7,16 @@ router.post("/signUp", authController.signUp);
 router.post("/signIn", authController.signIn);
 router.post("/register", authController.Register);
 router.post("/verify-otp", authController.verifyOtpAndRegister);
+ router.post("/forgot-password", authController.forgotPassword);
+router.post("/verify-reset-otp", authController.verifyResetOtp);
+ router.post("/reset-password", authController.resetPassword);
+
+
+
+
+
+
+
 router.post("/signOut", isAuth, authController.signOut);
 router.get("/users",isAuth, authController.getAllUser);
 router.post("/refresh-token", authController.refreshTokenController);

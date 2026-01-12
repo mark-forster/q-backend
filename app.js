@@ -1,34 +1,47 @@
-const express= require('express');
-const connectDB = require('./db/connectDb');
-const cors=require('cors');
-const cookieParser = require('cookie-parser');
-const routes = require('./routes/v1/index.route')
+require("dotenv").config();
+const express = require("express");
+const http = require("http");
+const cors = require("cors");
+const cookieParser = require("cookie-parser");
+const path = require("path");
 const httpStatus = require("http-status");
-const {app,server} = require('./socket/socket');
-const { errorHandler,errorConverter } = require("./middlewares/error");
-const path= require('path');
-const { config } = require('./config');
 
-// const __dirname = path.resolve();
+const connectDB = require("./db/connectDb");
+const routes = require("./routes/v1/index.route");
+const { errorHandler, errorConverter } = require("./middlewares/error");
+const ApiError = require("./config/apiError");
+const { config } = require("./config");
 
-// Require the cloudinary library
-const cloudinary = require('cloudinary').v2;
+// 🔥 CREATE EXPRESS APP HERE
+const app = express();
+const server = http.createServer(app);
+
+// 🔥 INIT SOCKET (CORRECT PLACE)
+const initSocket = require("./socket");
+initSocket(server);
+
+// Cloudinary
+const cloudinary = require("cloudinary").v2;
 cloudinary.config({
   cloud_name: config.cloudinary.cloudName,
   api_key: config.cloudinary.apiKey,
   api_secret: config.cloudinary.apiSecret,
 });
 
-
-
-const ApiError= require('./config/apiError');
+// DB
 connectDB();
+
+// Trust proxy
 if (config.isProd) {
-  app.set('trust proxy', 1);
+  app.set("trust proxy", 1);
 }
-app.use(express.json({ limit: "50mb" })); // To parse JSON data in the req.body
-app.use(express.urlencoded({ extended:false })); //To parse data in req.body
+
+// Middlewares
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
+
+// CORS
 const allowedOrigins = (config.isProd
   ? config.cors.prodOrigins
   : config.cors.devOrigins
@@ -37,7 +50,6 @@ const allowedOrigins = (config.isProd
 app.use(
   cors({
     origin(origin, callback) {
-      // allow no-origin (mobile/Postman) if enabled
       if (!origin && config.cors.allowNoOrigin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
       return callback(new Error(`Not allowed by CORS: ${origin}`), false);
@@ -46,26 +58,25 @@ app.use(
   })
 );
 
-if (config.uploads?.provider === 'local') {
-  const root = path.join(process.cwd(), config.uploads.localDir); 
-  app.use(`/${config.uploads.localDir}`, express.static(root, { maxAge: '1d', etag: true }));
+// Static uploads
+if (config.uploads?.provider === "local") {
+  const root = path.join(process.cwd(), config.uploads.localDir);
+  app.use(`/${config.uploads.localDir}`, express.static(root));
 }
-app.use(
-  `/${config.uploads.localDir}`, 
-  express.static(path.join(__dirname, config.uploads.localDir))
-);
 
-// routes conncection
-app.use('/api/v1/', routes)
+// Routes
+app.use("/api/v1", routes);
 
-// giving 404 Error for unknown request
+// 404
 app.use((req, res, next) => {
-    next(new ApiError(httpStatus.NOT_FOUND, "404 not found"));
-  });
-//   handle any error to show error message
-  app.use(errorConverter);
-  app.use(errorHandler);
+  next(new ApiError(httpStatus.NOT_FOUND, "404 not found"));
+});
 
-  server.listen(config.port, () => {
-  console.log(`Server is running on :${config.port} [${config.env}]`);
+// Error handlers
+app.use(errorConverter);
+app.use(errorHandler);
+
+// Start server
+server.listen(config.port, () => {
+  console.log(`Server running on ${config.port} [${config.env}]`);
 });

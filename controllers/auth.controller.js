@@ -2,6 +2,8 @@ const User = require("../models/user.model");
 const authService = require("../services/auth.service");
 const catchAsync = require("../config/catchAsync");
 const httpStatus = require("http-status");
+const jwt = require("jsonwebtoken");
+const ApiError = require("../config/apiError");
 
 const signUp = catchAsync(async (req, res) => {
   if (await User.isEmailTaken(req.body.email)) {
@@ -97,8 +99,40 @@ const getMe = catchAsync(async (req, res) => {
   res.status(httpStatus.OK).json({ message: "User data fetched successfully", user });
 });
 
+const forgotPassword = catchAsync(async (req, res) => {
+  const { email } = await authService.forgotPassword(req.body);
+  res.json({
+    message: "If account exists, OTP sent to email",
+    email,
+  });
+});
+const verifyResetOtp = catchAsync(async (req, res) => {
+  const { resetToken, options } =
+    await authService.verifyResetOtp(req.body);
 
+  res
+    .cookie("resetToken", resetToken, options)
+    .json({ message: "OTP verified",resetToken:resetToken,options });
+});
 
+const resetPassword = catchAsync(async (req, res) => {
+  const token = req.cookies.resetToken;
+  if (!token) {
+    throw new ApiError(httpStatus.UNAUTHORIZED, "Unauthorized");
+  }
+
+  const decoded = jwt.verify(token, process.env.JWT_TEMP_SECRET);
+
+  await authService.resetPassword({
+    email: decoded.email,
+    newPassword: req.body.newPassword,
+  });
+
+  res
+    .clearCookie("resetToken")
+    .json({ message: "Password reset successful" });
+});
+ 
 module.exports = {
   signUp,
   signIn,
@@ -107,5 +141,8 @@ module.exports = {
   getAllUser,
   Register,
   verifyOtpAndRegister,
-  getMe
+  getMe,
+  forgotPassword,
+  verifyResetOtp,
+  resetPassword 
 };

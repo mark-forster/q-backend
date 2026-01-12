@@ -1,9 +1,13 @@
 // services/message.service.js
 const Message = require("../models/message.model");
 const Conversation = require("../models/conversation.model");
-const { io, getRecipientSocketIds, getOnlineUserIds } = require("../socket/socket");
+const {
+  emitToUser,
+  emitToRoom,
+} = require("../socket/socketEmitter");
 const cloudinary = require("cloudinary").v2;
 const fs = require("fs");
+const { getOnlineUserIds } = require("../socket/socketState");
 
 // Helper Fuctions
 
@@ -34,16 +38,15 @@ const createGroupChat = async ({ name, participants, creatorId }) => {
       participants: uniqueParticipants,
       admins: [creatorId], // creator is admin
     });
+    conversation.deletedBy = [];
     await conversation.save();
    // ⭐ REAL-TIME EVENT EMIT (Fix)
     const convObj = (await conversation.populate("participants", "username name profilePic")).toObject();
 
     uniqueParticipants.forEach((uid) => {
-      const socketIds = getRecipientSocketIds(uid);
-      socketIds.forEach((sid) =>
-        io.to(sid).emit("conversationCreated", convObj)
-      );
-    });
+  emitToUser(uid, "conversationCreated", convObj);
+});
+
      return convObj;
 
   } catch (error) {
@@ -150,14 +153,7 @@ function resolveLastMessageText(messageText, attachments = [], messageType = "te
   return "File";
 }
 
-// Helper: emit to all socketIds of a user
-function emitToUser(userId, event, payload) {
-  const sockets = getRecipientSocketIds(userId);
-  if (!sockets || !sockets.length) return;
-  sockets.forEach((sid) => {
-    io.to(sid).emit(event, payload);
-  });
-}
+
 
 // -----------------------------
 // SEND MESSAGE (single + group)
@@ -258,7 +254,17 @@ const sendMessage = async ({
       messageType: "text",
       replyTo: replyTo || null,
     });
-await newMessage.populate("sender", "name username profilePic");
+await newMessage.populate([
+  { path: "sender", select: "name username profilePic" },
+  {
+    path: "replyTo",
+    populate: {
+      path: "sender",
+      select: "name username profilePic",
+    },
+  },
+]);
+
 
     // --------------------------------------------------
     // 6️⃣ Update conversation.lastMessage (smart text)
@@ -665,12 +671,15 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
         conversation.lastMessage = undefined;
       }
       await conversation.save();
-
+const preview = buildConversationPreview(conversation);
+conversation.participants.forEach((uid) => {
+  emitToUser(uid.toString(), "conversationUpdated", preview);
+});
       // notify all participants in this conversation room
-      io.to(String(conversationId)).emit("messageDeleted", {
-        conversationId: String(conversationId),
-        messageId: String(deletedMessageId),
-      });
+     emitToRoom(conversationId, "messageDeleted", {
+  conversationId: String(conversationId),
+  messageId: String(deletedMessageId),
+});
     }
 
     return {
@@ -734,9 +743,9 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
       await Message.deleteMany({ conversationId });
       await Conversation.findByIdAndDelete(conversationId);
 
-      io.to(String(conversationId)).emit("conversationPermanentlyDeleted", {
-        conversationId: String(conversationId),
-      });
+      emitToRoom(conversationId, "conversationPermanentlyDeleted", {
+  conversationId: String(conversationId),
+});
 
       return {
         permanentlyDeleted: true,
@@ -759,12 +768,20 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
 // -----------------------------
 const updateMessage = async ({ messageId, newText, currentUserId }) => {
   try {
-    const message = await Message.findById(messageId);
+    const message = await Message.findById(messageId)
+  .populate("sender", "name username profilePic");
+
     if (!message) throw new Error("Message not found.");
 
-    if (message.sender.toString() !== String(currentUserId)) {
-      throw new Error("You are not authorized to update this message.");
-    }
+   const senderId =
+  typeof message.sender === "object"
+    ? String(message.sender._id)
+    : String(message.sender);
+
+if (senderId !== String(currentUserId)) {
+  throw new Error("You are not authorized to update this message.");
+}
+
 
     const text = (newText ?? "").toString();
 
@@ -798,11 +815,13 @@ const updateMessage = async ({ messageId, newText, currentUserId }) => {
     }
 
     // send socket event for that conversation room
-    io.to(String(conversationId)).emit("messageUpdated", {
-      conversationId: String(conversationId),
-      messageId: String(messageId),
-      newText: message.text, //
-    });
+   emitToRoom(conversationId, "messageUpdated", {
+  conversationId: String(conversationId),
+  messageId: String(messageId),
+  newText: message.text,
+  sender: message.sender,
+});
+
 
     return message;
   } catch (error) {
@@ -816,19 +835,103 @@ const updateMessage = async ({ messageId, newText, currentUserId }) => {
 // -----------------------------
 const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
   try {
-    const originalMessage = await Message.findById(messageId);
+    const originalMessage = await Message.findById(messageId)
+  .populate("sender", "name username");
+
     if (!originalMessage) throw new Error("Original message not found");
 
+    const senderId = String(currentUserId);
     const forwarded = [];
 
     for (const rid of recipientIds) {
-      const recipientId = String(rid);
-      const senderId = String(currentUserId);
+      const targetId = String(rid);
+
+      // =========================
+      // 🔹 1️⃣ CHECK GROUP FIRST
+      // =========================
+      const group = await Conversation.findById(targetId);
+
+      if (group && group.isGroup) {
+        // ---------- GROUP FORWARD ----------
+        // auto restore group if deleted
+        if (group.deletedBy?.includes(senderId)) {
+          group.deletedBy = group.deletedBy.filter(
+            (id) => id.toString() !== senderId
+          );
+          await group.save();
+          emitToUser(senderId, "conversationRestored", group.toObject());
+        }
+
+      const newMsg = await Message.create({
+  sender: senderId,
+  conversationId: group._id,
+  text: originalMessage.text,
+  attachments: originalMessage.attachments || [],
+
+  isForwarded: true,
+  forwardedFrom: {
+    user: originalMessage.sender?._id,
+    name: originalMessage.sender?.name,
+    username: originalMessage.sender?.username,
+    fromGroup: true,
+  },
+
+  messageType: originalMessage.messageType,
+  callInfo: originalMessage.callInfo,
+  replyTo: originalMessage.replyTo || null,
+  seenBy: [senderId],
+});
+
+await newMsg.populate([
+  { path: "sender", select: "name username profilePic" },
+  {
+    path: "replyTo",
+    populate: {
+      path: "sender",
+      select: "name username profilePic",
+    },
+  },
+]);
+
+        group.lastMessage = {
+          _id: newMsg._id,
+          text: resolveLastMessageText(
+            newMsg.text,
+            newMsg.attachments,
+            newMsg.messageType,
+            newMsg.callInfo
+          ),
+          sender: senderId,
+          seenBy: [senderId],
+          updatedAt: new Date(),
+          callInfo: newMsg.callInfo || null,
+        };
+
+        await group.save();
+
+        // notify all group members
+        group.participants.forEach((uid) => {
+          emitToUser(uid.toString(), "newMessage", newMsg);
+          emitToUser(
+            uid.toString(),
+            "conversationUpdated",
+            buildConversationPreview(group)
+          );
+        });
+
+        forwarded.push(newMsg);
+        continue;
+      }
+
+      // =========================
+      // 🔹 2️⃣ USER (DM) FORWARD
+      // =========================
+      const recipientId = targetId;
 
       let conversation = await Conversation.findOne({
         isGroup: false,
         participants: { $all: [senderId, recipientId], $size: 2 },
-      }).populate("participants", "username profilePic name");
+      });
 
       const isNew = !conversation;
 
@@ -837,59 +940,95 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
           isGroup: false,
           participants: [senderId, recipientId],
         });
-        conversation = await conversation.populate(
-          "participants",
-          "username name profilePic"
-        );
       }
 
-      const newMsg = await Message.create({
-        sender: senderId,
-        receiver: recipientId,
-        conversationId: conversation._id,
-        text: originalMessage.text,
-        attachments: originalMessage.attachments || [],
-        seenBy: [senderId],
-        isForwarded: true,
-        messageType: originalMessage.messageType,
-        callInfo: originalMessage.callInfo,
-        replyTo: originalMessage.replyTo || null,
-      });
+      // auto restore DM
+      if (conversation.deletedBy?.includes(recipientId)) {
+        conversation.deletedBy = conversation.deletedBy.filter(
+          (id) => id.toString() !== recipientId
+        );
+        await conversation.save();
+        emitToUser(recipientId, "conversationRestored", conversation.toObject());
+      }
 
-      const lastText = resolveLastMessageText(
-        originalMessage.text,
-        originalMessage.attachments || [],
-        originalMessage.messageType,
-        originalMessage.callInfo
-      );
+    const newMsg = await Message.create({
+  sender: senderId,
+  receiver: recipientId,
+  conversationId: conversation._id,
+  text: originalMessage.text,
+  attachments: originalMessage.attachments || [],
+
+  isForwarded: true,
+  forwardedFrom: {
+    user: originalMessage.sender?._id,
+    name: originalMessage.sender?.name,
+    username: originalMessage.sender?.username,
+    fromGroup: false, // ⭐ DM
+  },
+
+  messageType: originalMessage.messageType,
+  callInfo: originalMessage.callInfo,
+  replyTo: originalMessage.replyTo || null,
+  seenBy: [senderId],
+});
+
+await newMsg.populate([
+  { path: "sender", select: "name username profilePic" },
+  {
+    path: "replyTo",
+    populate: {
+      path: "sender",
+      select: "name username profilePic",
+    },
+  },
+]);
+
       conversation.lastMessage = {
         _id: newMsg._id,
-        text: lastText,
+        text: resolveLastMessageText(
+          newMsg.text,
+          newMsg.attachments,
+          newMsg.messageType,
+          newMsg.callInfo
+        ),
         sender: senderId,
         seenBy: [senderId],
         updatedAt: new Date(),
-        callInfo: originalMessage.callInfo || null,
+        callInfo: newMsg.callInfo || null,
       };
+
       await conversation.save();
 
-      forwarded.push(newMsg);
-
-      // notify participants
       if (isNew) {
-        const convObj = conversation.toObject();
-        emitToUser(recipientId, "conversationCreated", convObj);
-        emitToUser(senderId, "conversationCreated", convObj);
+        emitToUser(recipientId, "conversationCreated", conversation.toObject());
+        emitToUser(senderId, "conversationCreated", conversation.toObject());
       }
 
       emitToUser(recipientId, "newMessage", newMsg);
+      emitToUser(senderId, "newMessage", newMsg);
+      emitToUser(
+        recipientId,
+        "conversationUpdated",
+        buildConversationPreview(conversation)
+      );
+      emitToUser(
+        senderId,
+        "conversationUpdated",
+        buildConversationPreview(conversation)
+      );
+
+      forwarded.push(newMsg);
     }
 
     return forwarded;
-  } catch (error) {
-    console.error("Error forwarding message:", error);
-    throw error;
+  } catch (err) {
+    console.error("Forward message error:", err);
+    throw err;
   }
 };
+
+
+
 
 // -----------------------------
 // DELETE MESSAGE FOR ME
@@ -966,11 +1105,11 @@ const updateMessagesSeenStatus = async ({ conversationId, userId }) => {
         { new: true }
       );
     }
+emitToRoom(cid, "messagesSeen", {
+  conversationId: cid,
+  userId: uid,
+});
 
-    io.to(cid).emit("messagesSeen", {
-      conversationId: cid,
-      userId: uid,
-    });
 
     return { ok: true };
   } catch (error) {
@@ -982,43 +1121,45 @@ const updateMessagesSeenStatus = async ({ conversationId, userId }) => {
 // -----------------------------
 // MESSAGE REACTIONS
 // -----------------------------
+
 const reactToMessage = async ({ messageId, userId, emoji }) => {
-  try {
-    const message = await Message.findById(messageId);
-    if (!message) throw new Error("Message not found");
+  const message = await Message.findById(messageId);
+  if (!message) throw new Error("Message not found");
 
-    const uid = String(userId);
-    let reactions = message.reactions || [];
-    const existingIndex = reactions.findIndex(
-      (r) => r.user.toString() === uid
-    );
+  const uid = String(userId);
+  let reactions = message.reactions || [];
 
-    if (!emoji || !emoji.trim()) {
-      // remove reaction
-      if (existingIndex !== -1) {
-        reactions.splice(existingIndex, 1);
-      }
-    } else if (existingIndex === -1) {
-      reactions.push({ user: uid, emoji });
-    } else {
-      reactions[existingIndex].emoji = emoji;
-    }
+  const index = reactions.findIndex(
+    (r) => r.user.toString() === uid
+  );
 
-    message.reactions = reactions;
-    await message.save();
-
-    io.to(String(message.conversationId)).emit("messageReactionUpdated", {
-      conversationId: String(message.conversationId),
-      messageId: String(message._id),
-      reactions: message.reactions,
-    });
-
-    return message;
-  } catch (error) {
-    console.error("reactToMessage Error:", error);
-    throw error;
+  if (!emoji || !emoji.trim()) {
+    if (index !== -1) reactions.splice(index, 1);
+  } else if (index === -1) {
+    reactions.push({ user: uid, emoji });
+  } else {
+    reactions[index].emoji = emoji;
   }
+
+  message.reactions = reactions;
+  await message.save();
+
+  // 🔥 SOCKET EMIT ကို SERVICE ထဲမှာပဲလုပ်
+  const conv = await Conversation.findById(message.conversationId);
+  if (conv) {
+    conv.participants.forEach((uid) => {
+      emitToUser(uid.toString(), "messageReactionUpdated", {
+        conversationId: String(message.conversationId),
+        messageId: String(message._id),
+        reactions: message.reactions,
+      });
+    });
+  }
+
+  return message;
 };
+
+
 
 // -----------------------------
 // PIN / UNPIN MESSAGES
@@ -1041,7 +1182,7 @@ const pinMessage = async ({ conversationId, messageId, userId }) => {
       await conv.save();
     }
 
-    io.to(String(conversationId)).emit("messagePinned", {
+    emitToRoom(conversationId, "messagePinned", {
       conversationId: String(conversationId),
       messageId: String(messageId),
     });
@@ -1063,8 +1204,7 @@ const unpinMessage = async ({ conversationId, messageId }) => {
         (p) => p.messageId.toString() !== String(messageId)
       ) || [];
     await conv.save();
-
-    io.to(String(conversationId)).emit("messageUnpinned", {
+emitToRoom(conversationId, "messageUnpinned", {
       conversationId: String(conversationId),
       messageId: String(messageId),
     });
@@ -1092,8 +1232,8 @@ module.exports = {
   forwardMessage,
   deleteMessageForMe,
   updateMessagesSeenStatus,
-  reactToMessage,
   pinMessage,
   unpinMessage,
   searchMessages,
+  reactToMessage,
 };
