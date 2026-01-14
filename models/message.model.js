@@ -1,7 +1,6 @@
-// models/message.model.js
 const mongoose = require("mongoose");
 
-// ---- Attachment Subdocument ----
+// ---- Attachment  ----
 const attachmentSchema = new mongoose.Schema(
   {
     type: {
@@ -28,7 +27,6 @@ const attachmentSchema = new mongoose.Schema(
       default: null,
     },
     mimeType: { type: String, default: null },
-    // ✅ for private audio/video/raw signed URL
     signedUrl: { type: String, default: null },
   },
   { _id: false }
@@ -82,7 +80,6 @@ const messageSchema = new mongoose.Schema(
       required: true,
     },
 
-    // ✅ for direct messages / call messages
     receiver: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -96,27 +93,23 @@ const messageSchema = new mongoose.Schema(
       default: [],
     },
 
-    // ✅ to distinguish text / call / system
     messageType: {
       type: String,
       enum: ["text", "call", "system"],
       default: "text",
     },
 
-    // Call message support
     callInfo: {
       type: callInfoSchema,
       default: null,
     },
 
-    // ✅ Reply / Quote
     replyTo: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Message",
       default: null,
     },
 
-    // ✅ Reactions (👍❤️😂…)
     reactions: {
       type: [reactionSchema],
       default: [],

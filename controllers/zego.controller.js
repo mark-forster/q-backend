@@ -12,7 +12,7 @@ const getZegoToken = async (req, res, next) => {
   try {
     const { roomID, userID } = req.body;
 
-    // 1) basic validation
+    //validation
     if (!roomID || !userID) {
       return errorResponse(
         res,
@@ -29,7 +29,7 @@ const getZegoToken = async (req, res, next) => {
       );
     }
 
-    // 2) length + simple sanitization
+    //sanitization
     if (roomID.length > 128 || userID.length > 64) {
       return errorResponse(
         res,
@@ -37,8 +37,6 @@ const getZegoToken = async (req, res, next) => {
         "roomID or userID too long."
       );
     }
-
-    // 3) auth user must match userID (Token Hardening – မိမိကိုယ် userID နဲ့ပဲ token ယူလို့ရမယ်)
     const authUserId = String(req.user?.id || req.user?._id || "");
     if (authUserId && authUserId !== String(userID)) {
       return errorResponse(
@@ -56,7 +54,7 @@ const getZegoToken = async (req, res, next) => {
       );
     }
 
-    const effectiveTimeInSeconds = 3600; // 1 hr – production-safe upper bound
+    const effectiveTimeInSeconds = 3600;
 
     const payload = JSON.stringify({ roomID });
 

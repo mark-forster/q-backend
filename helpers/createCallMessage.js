@@ -21,7 +21,6 @@ module.exports.createCallMessage = async ({
   conversationId = null,
   isGroup = false,
 }) => {
-  // ✅ EARLY VALIDATION (MOST IMPORTANT)
   if (!sender) {
     throw new Error("createCallMessage: sender is required");
   }
@@ -55,7 +54,6 @@ module.exports.createCallMessage = async ({
         });
       }
     } else {
-      // group + no conversationId → NOT allowed
       throw new Error("createCallMessage: group call requires conversationId");
     }
 
@@ -114,6 +112,6 @@ module.exports.createCallMessage = async ({
     return isGroup ? messages[0] : messages;
   } catch (err) {
     console.error("createCallMessage error:", err.message);
-    throw err; // 🔥 let caller know
+    throw err; 
   }
 };

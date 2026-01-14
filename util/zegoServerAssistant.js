@@ -9,7 +9,7 @@ var ErrorCode; // Define enum for error codes
     ErrorCode[ErrorCode["secretInvalid"] = 5] = "secretInvalid";
     ErrorCode[ErrorCode["effectiveTimeInSecondsInvalid"] = 6] = "effectiveTimeInSecondsInvalid";
 })(ErrorCode || (ErrorCode = {}));
-function RndNum(a, b) { // Function to return random number within given range
+function RndNum(a, b) { 
     return Math.ceil((a + (b - a)) * Math.random());
 }
 // Function to generate random 16 character string

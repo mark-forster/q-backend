@@ -33,7 +33,7 @@ async function finalizeCall(roomID, reason) {
 
   const finalParticipants = [
     ...new Set([
-      ...(call.originalParticipants || []), // ✅ ALWAYS use original list for final event
+      ...(call.originalParticipants || []), 
       ...(call.participants || []),
       ...(call.ringingUsers || []),
     ]),
@@ -67,7 +67,6 @@ async function finalizeCall(roomID, reason) {
         conversationId: call.conversationId,
       });
     } else {
-      // 🔥 Single Call Completed Message
       const otherUserId = (call.originalParticipants || []).find(
         (p) => String(p) !== String(call.caller)
       );
@@ -241,12 +240,7 @@ socket.on("reactMessage", async ({ messageId, userId, emoji }) => {
 
           // If it is NOT a group chat (meaning it's a DM), treat as Single Call
           if (!conv.isGroup) {
-            // ... fall through to single call logic ...
-            // To reuse single call logic, we can just skip this block or handle it here.
-            // Let's redirect to single call logic below by clearing conversationId for this scope
-            // OR better: copy-paste single call logic or refactor.
             
-            // Refactor:
             receivers = conv.participants
               .map((id) => String(id))
               .filter((id) => id !== caller);
@@ -259,7 +253,7 @@ socket.on("reactMessage", async ({ messageId, userId, emoji }) => {
               callType,
               status: "ringing",
               startedAt: null,
-              isGroup: false, // ✅ DM = Single Call
+              isGroup: false, 
               conversationId,
             });
 
@@ -391,7 +385,7 @@ socket.on("reactMessage", async ({ messageId, userId, emoji }) => {
       call.participants.push(uid);
     }
 
-    // ringing list မှ ဖယ်
+    // ringing list 
     call.ringingUsers = call.ringingUsers.filter(
       (u) => String(u) !== String(uid)
     );
@@ -446,7 +440,7 @@ socket.on("reactMessage", async ({ messageId, userId, emoji }) => {
       (u) => String(u) !== String(rejecterId)
     );
 
-    // 🔥 SINGLE CALL → notify caller directly
+    //  SINGLE CALL → notify caller directly
     if (!call.isGroup) {
       getRecipientSocketIds(callerId).forEach((sid) =>
         io.to(sid).emit("callRejected", { roomID })
@@ -552,7 +546,7 @@ socket.on("reactMessage", async ({ messageId, userId, emoji }) => {
 
       const leaver = uid;
 
-      // 🔥 SINGLE CALL → One leaves = END for everyone
+      //  SINGLE CALL → One leaves = END for everyone
       if (!call.isGroup) {
         await finalizeCall(roomID, "completed");
         return;
@@ -573,7 +567,7 @@ socket.on("reactMessage", async ({ messageId, userId, emoji }) => {
         );
       });
 
-      // 🔥 no one left in call → END CALL
+      // noone left in call → END CALL
       if (call.participants.length === 0) {
         // stop ringing for others
         call.ringingUsers.forEach((rid) => {
@@ -630,7 +624,7 @@ socket.on("reactMessage", async ({ messageId, userId, emoji }) => {
     );
   });
 
-  /* ------------ CHECK CALL STATUS (Robustness) ------------ */
+  /* ------------ CHECK CALL STATUS ------------ */
   socket.on("checkCallStatus", ({ roomID }, callback) => {
     const call = activeCalls.get(roomID);
     if (!call) {

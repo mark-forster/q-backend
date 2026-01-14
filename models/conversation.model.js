@@ -1,7 +1,5 @@
-// models/conversation.model.js
 const mongoose = require("mongoose");
 
-// ✅ callInfo subdocument (for lastMessage preview in conversation list)
 const lastCallInfoSchema = new mongoose.Schema(
   {
     status: {
@@ -35,7 +33,6 @@ const lastMessageSchema = new mongoose.Schema(
     // message id of last message
     _id: { type: mongoose.Schema.Types.ObjectId, ref: "Message" },
 
-    // ✅ callInfo for call preview in sidebar
     callInfo: {
       type: lastCallInfoSchema,
       default: null,
@@ -43,11 +40,10 @@ const lastMessageSchema = new mongoose.Schema(
   },
   {
     _id: false,
-    timestamps: true, // createdAt / updatedAt for lastMessage
+    timestamps: true, 
   }
 );
 
-// ✅ pinned messages for conversation (Telegram style)
 const pinnedMessageSchema = new mongoose.Schema(
   {
     messageId: {
@@ -68,8 +64,6 @@ const pinnedMessageSchema = new mongoose.Schema(
 const conversationSchema = new mongoose.Schema(
   {
     isGroup: { type: Boolean, default: false },
-
-    // Group name (required only when isGroup = true)
     name: {
       type: String,
       required: function () {
@@ -77,12 +71,9 @@ const conversationSchema = new mongoose.Schema(
       },
     },
 
-    // Participants (for both single & group)
     participants: [
       { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     ],
-
-    // ✅ Group admins (for advanced permissions)
     admins: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
 
     // Last message preview

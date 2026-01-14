@@ -20,7 +20,6 @@ const otpSchema = new mongoose.Schema(
     },
 
     payload: {
-      // 🔹 REGISTER အတွက်သာ user data
       name: String,
       username: String,
       email: String,

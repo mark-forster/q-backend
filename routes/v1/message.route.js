@@ -1,11 +1,9 @@
-// routes/message.route.js
 const express = require("express");
 const router = express.Router();
 const messageController = require("../../controllers/message.controller");
 const isAuth = require("../../middlewares/isAuth");
 const upload = require("../../util/multer");
 
-//goto message page / start conversation
 router.post(
   "/conversations/start",
   isAuth,
@@ -27,7 +25,7 @@ router.get(
   messageController.getSignedUrl
 );
 
-// Get messages from a conversation (group or one-to-one) + pagination
+// Get messages from a conversation 
 router.get(
   "/conversation/:conversationId",
   isAuth,
@@ -41,7 +39,7 @@ router.get(
   messageController.searchMessages
 );
 
-// Legacy route (if used) - still mapped to startConversation
+//  route 
 router.get("/conve/:id", isAuth, messageController.startConversation);
 
 // Get all conversations for current user
@@ -53,7 +51,7 @@ router.put("/group/rename", isAuth, messageController.renameGroup);
 router.put("/group/add", isAuth, messageController.addToGroup);
 router.put("/group/remove", isAuth, messageController.removeFromGroup);
 
-// Update message (edit text)
+// Update message 
 router.put("/update/:messageId", isAuth, messageController.updateMessage);
 
 // Message delete route

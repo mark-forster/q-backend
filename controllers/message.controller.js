@@ -47,7 +47,7 @@ const sendMessage = catchAsync(async (req, res, next) => {
     .json({ message: "Message sent successfully", data: newMessage });
 });
 
-// getMessages controller (with pagination)
+// getMessages controller
 const getMessages = catchAsync(async (req, res, next) => {
   const { conversationId } = req.params;
   const userId = req.user._id;
@@ -223,11 +223,9 @@ const deleteConversation = catchAsync(async (req, res, next) => {
   });
 });
 
-// update Method (EDIT MESSAGE)
+// update Method
 const updateMessage = catchAsync(async (req, res) => {
   const { messageId } = req.params;
-  // 🔧 FIX: frontend က newText သို့မဟုတ် message နဲ့ပို့လာနိုင်လို့
-  // နှစ်မျိုးလုံးကို support လုပ်ပေးထားတယ်
   const { newText, message } = req.body;
   const currentUserId = req.user._id;
 
@@ -256,14 +254,13 @@ const updateMessage = catchAsync(async (req, res) => {
       .json({ message: "Message not found or unauthorized" });
   }
 
-  // 🔧 FIX: full updated message ကို data အနေနဲ့ ပြန်ပို့မယ်
   res.status(200).json({
     message: "Message Updated Successfully",
     data: result,
   });
 });
 
-//forward Message Method
+//forward  Method
 const forwardMessage = catchAsync(async (req, res) => {
   const { messageId } = req.params;
   const { recipientIds } = req.body;
@@ -281,7 +278,6 @@ const forwardMessage = catchAsync(async (req, res) => {
     .json({ message: "Message forwarding failed. Please try again." });
 });
 
-// controller
 const getSignedUrl = catchAsync(async (req, res) => {
   const { publicId } = req.params;
   if (!publicId)
@@ -289,24 +285,24 @@ const getSignedUrl = catchAsync(async (req, res) => {
 
   const resourceType = req.query.resourceType || "video";
   const format = req.query.format;
-  const forceMp3 = String(req.query.forceMp3 || "").toLowerCase() === "true"; // 15 minute expiry
+  const forceMp3 = String(req.query.forceMp3 || "").toLowerCase() === "true"; // 15 minute 
 
   const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
 
   if (resourceType === "video") {
     const opts = {
-      resource_type: "video", // Cloudinary handles audio under 'video'
+      resource_type: "video",
       type: "authenticated",
       secure: true,
       sign_url: true,
       expires_at: expiresAt,
-    }; // audio: optionally transcode to mp3 for widest support
+    };
 
     if (forceMp3) {
       opts.format = "mp3";
       opts.transformation = [{ audio_codec: "mp3" }];
     } else if (format) {
-      opts.format = format; // serve requested/original format
+      opts.format = format;
     }
 
     const url = cloudinary.url(publicId, opts);
@@ -347,7 +343,6 @@ const getSignedUrl = catchAsync(async (req, res) => {
   return res.json({ url });
 });
 
-// Delete For Me controller function
 const deleteMessageForMe = catchAsync(async (req, res, next) => {
   const { messageId } = req.params;
   const currentUserId = req.user._id;
@@ -386,8 +381,6 @@ const updateMessagesSeenStatus = async (req, res) => {
     res.status(500).json({ error: "Internal Server Error" });
   }
 };
-
-// Reactions
 const reactToMessage = catchAsync(async (req, res) => {
   const { messageId } = req.params;
   const { emoji } = req.body;
@@ -405,7 +398,6 @@ const reactToMessage = catchAsync(async (req, res) => {
   });
 });
 
-// For DELETE reaction we can just call with empty emoji
 const removeReaction = catchAsync(async (req, res) => {
   const { messageId } = req.params;
   const userId = req.user._id;
@@ -422,7 +414,7 @@ const removeReaction = catchAsync(async (req, res) => {
   });
 });
 
-// Pin / Unpin
+
 const pinMessage = catchAsync(async (req, res) => {
   const { conversationId, messageId } = req.params;
   const userId = req.user._id;

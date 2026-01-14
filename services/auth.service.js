@@ -111,7 +111,7 @@ const otp = await otpService.generateAndSaveOTP(email, {
     return { email };
   } catch (err) {
     console.error("EMAIL LOGIN ERROR =>", err);
-    throw err; // catchAsync က handle လုပ်စေ
+    throw err; 
   }
 };
 
@@ -138,7 +138,7 @@ console.log("OTP payload =>", userData);
     name: userData.name,
     username: userData.username,
     email: userData.email,
-    password: userData.password, // ✅ guaranteed exists
+    password: userData.password, 
   });
 
   const accessToken = user.generateAccessToken();

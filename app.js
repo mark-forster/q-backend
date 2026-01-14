@@ -12,11 +12,11 @@ const { errorHandler, errorConverter } = require("./middlewares/error");
 const ApiError = require("./config/apiError");
 const { config } = require("./config");
 
-// 🔥 CREATE EXPRESS APP HERE
+//  CREATE EXPRESS APP HERE
 const app = express();
 const server = http.createServer(app);
 
-// 🔥 INIT SOCKET (CORRECT PLACE)
+//  INIT SOCKET 
 const initSocket = require("./socket");
 initSocket(server);
 

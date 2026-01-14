@@ -25,7 +25,7 @@ function buildConversationPreview(conversation) {
 
 
 // -----------------------------
-// Group Chat Helpers
+// Group Chat 
 // -----------------------------
 const createGroupChat = async ({ name, participants, creatorId }) => {
   try {
@@ -40,7 +40,7 @@ const createGroupChat = async ({ name, participants, creatorId }) => {
     });
     conversation.deletedBy = [];
     await conversation.save();
-   // ⭐ REAL-TIME EVENT EMIT (Fix)
+   // REAL-TIME EVENT EMIT
     const convObj = (await conversation.populate("participants", "username name profilePic")).toObject();
 
     uniqueParticipants.forEach((uid) => {
@@ -69,7 +69,7 @@ const findConversation = async (userId, otherUserId) => {
 };
 
 // -----------------------------
-// Helper: Upload Attachments
+// Upload Attachments
 // -----------------------------
 async function uploadAttachments(files = []) {
   if (!files || !files.length) return [];
@@ -87,14 +87,13 @@ async function uploadAttachments(files = []) {
     if (mimeType.startsWith("image/")) {
       attachmentType = mimeType === "image/gif" ? "gif" : "image";
       uploadOptions.resource_type = "image";
-      uploadOptions.type = "upload"; // public
     } else if (mimeType.startsWith("video/")) {
       attachmentType = "video";
       uploadOptions.resource_type = "video";
       uploadOptions.type = "authenticated";
     } else if (mimeType.startsWith("audio/")) {
       attachmentType = "audio";
-      uploadOptions.resource_type = "video"; // Cloudinary uses video for audio too
+      uploadOptions.resource_type = "video";
       uploadOptions.type = "authenticated";
     } else {
       attachmentType = "file";
@@ -131,7 +130,7 @@ async function uploadAttachments(files = []) {
   return Promise.all(uploads);
 }
 
-// Helper: build lastMessage text
+//  build lastMessage text
 function resolveLastMessageText(messageText, attachments = [], messageType = "text", callInfo = null) {
   if (messageType === "call") {
     if (!callInfo) return "Call";
@@ -153,13 +152,8 @@ function resolveLastMessageText(messageText, attachments = [], messageType = "te
   return "File";
 }
 
-
-
-// -----------------------------
-// SEND MESSAGE (single + group)
-// -----------------------------
 // ======================================================
-//        SEND MESSAGE (Patched Auto-Restore Version)
+//        SEND MESSAGE 
 // ======================================================
 const sendMessage = async ({
   recipientId,
@@ -176,7 +170,7 @@ const sendMessage = async ({
     let isNewConversation = false;
 
     // --------------------------------------------------
-    // 1️⃣ Find conversation
+    // Find conversation
     // --------------------------------------------------
     if (conversationId) {
       conversation = await Conversation.findById(conversationId).populate(
@@ -209,7 +203,7 @@ const sendMessage = async ({
     const isGroup = !!conversation.isGroup;
 
     // --------------------------------------------------
-    // 2️⃣ Fix receiver for DM
+    //  Fix receiver 
     // --------------------------------------------------
     if (!isGroup) {
       const friend = conversation.participants.find(
@@ -219,7 +213,7 @@ const sendMessage = async ({
     }
 
     // --------------------------------------------------
-    // 3️⃣ AUTO RESTORE (Telegram-style)
+    //   RESTORE 
     // --------------------------------------------------
     if (!isGroup && receiver && conversation.deletedBy?.includes(receiver)) {
       conversation.deletedBy = conversation.deletedBy.filter(
@@ -237,12 +231,12 @@ const sendMessage = async ({
     }
 
     // --------------------------------------------------
-    // 4️⃣ Upload attachments  ✅ (THIS WAS MISSING)
+    //  Upload attachments  
     // --------------------------------------------------
     const attachments = await uploadAttachments(files);
 
     // --------------------------------------------------
-    // 5️⃣ Create message
+    //  Create message
     // --------------------------------------------------
     const newMessage = await Message.create({
       conversationId: conversation._id,
@@ -267,7 +261,7 @@ await newMessage.populate([
 
 
     // --------------------------------------------------
-    // 6️⃣ Update conversation.lastMessage (smart text)
+    //  Update conversation.lastMessage 
     // --------------------------------------------------
     const lastText = resolveLastMessageText(
       message,
@@ -288,7 +282,7 @@ await newMessage.populate([
     await conversation.save();
 
     // --------------------------------------------------
-    // 7️⃣ 🔥 NEW: conversationUpdated (list-level realtime)
+    //  conversationUpdated 
     // --------------------------------------------------
     const preview = buildConversationPreview(conversation);
     conversation.participants.forEach((uid) => {
@@ -297,7 +291,7 @@ await newMessage.populate([
     });
 
     // --------------------------------------------------
-    // 8️⃣ Emit newMessage (message-level realtime)
+    // Emit newMessage
     // --------------------------------------------------
    if (isGroup) {
   conversation.participants.forEach((uid) => {
@@ -308,7 +302,6 @@ await newMessage.populate([
   });
 } else {
       emitToUser(receiver, "newMessage", newMessage);
-      // emitToUser(sender, "newMessage", newMessage);
 
       if (isNewConversation) {
         const obj = conversation.toObject();
@@ -424,7 +417,7 @@ const searchMessages = async ({ conversationId, userId, text }) => {
 };
 
 // -----------------------------
-// GET CONVERSATIONS (with unreadCount + online flag)
+// GET CONVERSATIONS 
 // -----------------------------
 const getConversations = async (userId) => {
   try {
@@ -469,7 +462,7 @@ const getConversations = async (userId) => {
 };
 
 // -----------------------------
-// Group ops (with admin checks)
+// Group  (with admin checks)
 // -----------------------------
 const renameGroup = async ({ conversationId, name, currentUserId }) => {
   try {
@@ -552,8 +545,6 @@ const leaveGroup = async ({ conversationId, userId }) => {
     if (!conversation || !conversation.isGroup) {
       throw new Error("Group not found");
     }
-
-    // user must be participant
     if (!conversation.participants.map(String).includes(uid)) {
       throw new Error("You are not a participant of this group");
     }
@@ -847,7 +838,7 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
       const targetId = String(rid);
 
       // =========================
-      // 🔹 1️⃣ CHECK GROUP FIRST
+      // CHECK GROUP 
       // =========================
       const group = await Conversation.findById(targetId);
 
@@ -924,7 +915,7 @@ await newMsg.populate([
       }
 
       // =========================
-      // 🔹 2️⃣ USER (DM) FORWARD
+      // FORWARD
       // =========================
       const recipientId = targetId;
 
@@ -963,7 +954,7 @@ await newMsg.populate([
     user: originalMessage.sender?._id,
     name: originalMessage.sender?.name,
     username: originalMessage.sender?.username,
-    fromGroup: false, // ⭐ DM
+    fromGroup: false, 
   },
 
   messageType: originalMessage.messageType,
@@ -1143,8 +1134,6 @@ const reactToMessage = async ({ messageId, userId, emoji }) => {
 
   message.reactions = reactions;
   await message.save();
-
-  // 🔥 SOCKET EMIT ကို SERVICE ထဲမှာပဲလုပ်
   const conv = await Conversation.findById(message.conversationId);
   if (conv) {
     conv.participants.forEach((uid) => {
