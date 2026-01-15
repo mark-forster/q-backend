@@ -1,10 +1,7 @@
 // services/message.service.js
 const Message = require("../models/message.model");
 const Conversation = require("../models/conversation.model");
-const {
-  emitToUser,
-  emitToRoom,
-} = require("../socket/socketEmitter");
+const { emitToUser, emitToRoom } = require("../socket/socketEmitter");
 const cloudinary = require("cloudinary").v2;
 const fs = require("fs");
 const { getOnlineUserIds } = require("../socket/socketState");
@@ -21,11 +18,8 @@ function buildConversationPreview(conversation) {
   };
 }
 
-
-
-
 // -----------------------------
-// Group Chat 
+// Group Chat
 // -----------------------------
 const createGroupChat = async ({ name, participants, creatorId }) => {
   try {
@@ -40,15 +34,16 @@ const createGroupChat = async ({ name, participants, creatorId }) => {
     });
     conversation.deletedBy = [];
     await conversation.save();
-   // REAL-TIME EVENT EMIT
-    const convObj = (await conversation.populate("participants", "username name profilePic")).toObject();
+    // REAL-TIME EVENT EMIT
+    const convObj = (
+      await conversation.populate("participants", "username name profilePic")
+    ).toObject();
 
     uniqueParticipants.forEach((uid) => {
-  emitToUser(uid, "conversationCreated", convObj);
-});
+      emitToUser(uid, "conversationCreated", convObj);
+    });
 
-     return convObj;
-
+    return convObj;
   } catch (error) {
     console.error("Group Chat Creation Error:", error);
     return null;
@@ -129,13 +124,28 @@ async function uploadAttachments(files = []) {
 
   return Promise.all(uploads);
 }
+//----------------------------
+// Helper for Group Action
+//------------------------
+async function buildFullConversation(conversationId) {
+  const conv = await Conversation.findById(conversationId)
+    .populate("participants", "username name profilePic updatedAt")
+    .populate("admins", "username name profilePic");
+  return conv ? conv.toObject() : null;
+}
 
 //  build lastMessage text
-function resolveLastMessageText(messageText, attachments = [], messageType = "text", callInfo = null) {
+function resolveLastMessageText(
+  messageText,
+  attachments = [],
+  messageType = "text",
+  callInfo = null
+) {
   if (messageType === "call") {
     if (!callInfo) return "Call";
     if (callInfo.status === "missed") return `Missed ${callInfo.callType} call`;
-    if (callInfo.status === "declined") return `Declined ${callInfo.callType} call`;
+    if (callInfo.status === "declined")
+      return `Declined ${callInfo.callType} call`;
     if (callInfo.status === "completed") return "Call ended";
     if (callInfo.status === "timeout") return "Call timeout";
     return `${callInfo.callType} call`;
@@ -153,7 +163,7 @@ function resolveLastMessageText(messageText, attachments = [], messageType = "te
 }
 
 // ======================================================
-//        SEND MESSAGE 
+//        SEND MESSAGE
 // ======================================================
 const sendMessage = async ({
   recipientId,
@@ -203,7 +213,7 @@ const sendMessage = async ({
     const isGroup = !!conversation.isGroup;
 
     // --------------------------------------------------
-    //  Fix receiver 
+    //  Fix receiver
     // --------------------------------------------------
     if (!isGroup) {
       const friend = conversation.participants.find(
@@ -213,7 +223,7 @@ const sendMessage = async ({
     }
 
     // --------------------------------------------------
-    //   RESTORE 
+    //   RESTORE
     // --------------------------------------------------
     if (!isGroup && receiver && conversation.deletedBy?.includes(receiver)) {
       conversation.deletedBy = conversation.deletedBy.filter(
@@ -231,7 +241,7 @@ const sendMessage = async ({
     }
 
     // --------------------------------------------------
-    //  Upload attachments  
+    //  Upload attachments
     // --------------------------------------------------
     const attachments = await uploadAttachments(files);
 
@@ -248,27 +258,21 @@ const sendMessage = async ({
       messageType: "text",
       replyTo: replyTo || null,
     });
-await newMessage.populate([
-  { path: "sender", select: "name username profilePic" },
-  {
-    path: "replyTo",
-    populate: {
-      path: "sender",
-      select: "name username profilePic",
-    },
-  },
-]);
-
+    await newMessage.populate([
+      { path: "sender", select: "name username profilePic" },
+      {
+        path: "replyTo",
+        populate: {
+          path: "sender",
+          select: "name username profilePic",
+        },
+      },
+    ]);
 
     // --------------------------------------------------
-    //  Update conversation.lastMessage 
+    //  Update conversation.lastMessage
     // --------------------------------------------------
-    const lastText = resolveLastMessageText(
-      message,
-      attachments,
-      "text",
-      null
-    );
+    const lastText = resolveLastMessageText(message, attachments, "text", null);
 
     conversation.lastMessage = {
       _id: newMessage._id,
@@ -281,26 +285,30 @@ await newMessage.populate([
 
     await conversation.save();
 
-    // --------------------------------------------------
-    //  conversationUpdated 
-    // --------------------------------------------------
-    const preview = buildConversationPreview(conversation);
-    conversation.participants.forEach((uid) => {
-      const id = uid._id?.toString?.() || uid.toString();
-      emitToUser(id, "conversationUpdated", preview);
-    });
+// --------------------------------------------------
+// conversationUpdated 
+// --------------------------------------------------
+const payload = conversation.isGroup
+  ? await buildFullConversation(conversation._id)
+  : buildConversationPreview(conversation);
+
+conversation.participants.forEach((uid) => {
+  const id = uid._id?.toString?.() || uid.toString();
+  emitToUser(id, "conversationUpdated", payload);
+});
+
 
     // --------------------------------------------------
     // Emit newMessage
     // --------------------------------------------------
-   if (isGroup) {
-  conversation.participants.forEach((uid) => {
-    const id = uid._id?.toString?.() || uid.toString();
-    if (id !== String(sender)) {
-      emitToUser(id, "newMessage", newMessage);
-    }
-  });
-} else {
+    if (isGroup) {
+      conversation.participants.forEach((uid) => {
+        const id = uid._id?.toString?.() || uid.toString();
+        if (id !== String(sender)) {
+          emitToUser(id, "newMessage", newMessage);
+        }
+      });
+    } else {
       emitToUser(receiver, "newMessage", newMessage);
 
       if (isNewConversation) {
@@ -328,7 +336,12 @@ await newMessage.populate([
 // -----------------------------
 // GET MESSAGES (with pagination + signed URLs)
 // -----------------------------
-const getMessages = async ({ conversationId, userId, skip = 0, limit = 50 }) => {
+const getMessages = async ({
+  conversationId,
+  userId,
+  skip = 0,
+  limit = 50,
+}) => {
   try {
     const numericSkip = Number(skip) || 0;
     const numericLimit = Number(limit) || 50;
@@ -341,10 +354,8 @@ const getMessages = async ({ conversationId, userId, skip = 0, limit = 50 }) => 
       .sort({ createdAt: -1 })
       .skip(numericSkip)
       .limit(numericLimit)
-       .populate("sender", "name username profilePic")
-      .populate("replyTo") 
-;
-
+      .populate("sender", "name username profilePic")
+      .populate("replyTo");
     // Attach signed URLs for private attachments
     for (const msg of messages) {
       if (!msg.attachments || !msg.attachments.length) continue;
@@ -417,7 +428,7 @@ const searchMessages = async ({ conversationId, userId, text }) => {
 };
 
 // -----------------------------
-// GET CONVERSATIONS 
+// GET CONVERSATIONS
 // -----------------------------
 const getConversations = async (userId) => {
   try {
@@ -468,7 +479,7 @@ const renameGroup = async ({ conversationId, name, currentUserId }) => {
   try {
     const conversation = await Conversation.findById(conversationId);
     if (!conversation || !conversation.isGroup) return null;
-
+    // Admin Check 
     if (
       conversation.admins.length &&
       !conversation.admins
@@ -480,7 +491,12 @@ const renameGroup = async ({ conversationId, name, currentUserId }) => {
 
     conversation.name = name;
     await conversation.save();
-    return conversation;
+    const full = await buildFullConversation(conversationId);
+    conversation.participants.forEach((uid) => {
+      emitToUser(uid.toString(), "conversationUpdated", full);
+    });
+
+    return full;
   } catch (error) {
     console.error("Rename Group Error:", error);
     return null;
@@ -488,54 +504,71 @@ const renameGroup = async ({ conversationId, name, currentUserId }) => {
 };
 
 const addToGroup = async ({ conversationId, userId, currentUserId }) => {
-  try {
-    const conversation = await Conversation.findById(conversationId);
-    if (!conversation || !conversation.isGroup) return null;
+  const conversation = await Conversation.findById(conversationId);
+  if (!conversation || !conversation.isGroup) return null;
 
-    if (
-      conversation.admins.length &&
-      !conversation.admins
-        .map((id) => id.toString())
-        .includes(String(currentUserId))
-    ) {
-      throw new Error("Not allowed to add member");
-    }
+  // admin check...
+  // if (
+  //   conversation.admins.length &&
+  //   !conversation.admins.map(String).includes(String(currentUserId))
+  // ) {
+  //   throw new Error("Not allowed to add member");
+  // }
 
-    if (!conversation.participants.map(String).includes(String(userId))) {
-      conversation.participants.push(userId);
-      await conversation.save();
-    }
-    return conversation;
-  } catch (error) {
-    console.error("Add to Group Error:", error);
-    return null;
+  const uid = String(userId);
+
+  if (!conversation.participants.map(String).includes(uid)) {
+    conversation.participants.push(uid);
+    await conversation.save();
   }
+
+  const full = await buildFullConversation(conversationId);
+
+  // existing members update
+  conversation.participants.forEach((pid) => {
+    emitToUser(pid.toString(), "conversationUpdated", full);
+  });
+
+  // new member should see it as new conversation 
+  emitToUser(uid, "conversationCreated", full);
+
+  return full;
 };
+
 
 const removeFromGroup = async ({ conversationId, userId, currentUserId }) => {
-  try {
-    const conversation = await Conversation.findById(conversationId);
-    if (!conversation || !conversation.isGroup) return null;
+  const conversation = await Conversation.findById(conversationId);
+  if (!conversation || !conversation.isGroup) return null;
 
-    if (
-      conversation.admins.length &&
-      !conversation.admins
-        .map((id) => id.toString())
-        .includes(String(currentUserId))
-    ) {
-      throw new Error("Not allowed to remove member");
-    }
-
-    conversation.participants = conversation.participants.filter(
-      (id) => id.toString() !== String(userId)
-    );
-    await conversation.save();
-    return conversation;
-  } catch (error) {
-    console.error("Remove from Group Error:", error);
-    return null;
+  // admin check...
+  if (
+    conversation.admins.length &&
+    !conversation.admins.map(String).includes(String(currentUserId))
+  ) {
+    throw new Error("Not allowed to remove member");
   }
+
+  const removedId = String(userId);
+
+  conversation.participants = conversation.participants.filter(
+    (id) => String(id) !== removedId
+  );
+  await conversation.save();
+
+  const full = await buildFullConversation(conversationId);
+
+  emitToUser(removedId, "removedFromGroup", {
+    conversationId: String(conversationId),
+  });
+
+  // remaining members update
+  conversation.participants.forEach((pid) => {
+    emitToUser(pid.toString(), "conversationUpdated", full);
+  });
+
+  return full;
 };
+
 
 const leaveGroup = async ({ conversationId, userId }) => {
   try {
@@ -561,7 +594,6 @@ const leaveGroup = async ({ conversationId, userId }) => {
       );
     }
 
-    // if no admin left → promote first participant
     if (
       conversation.admins.length === 0 &&
       conversation.participants.length > 0
@@ -573,22 +605,21 @@ const leaveGroup = async ({ conversationId, userId }) => {
 
     const convObj = conversation.toObject();
 
-    // socket notify remaining members
-    conversation.participants.forEach((pid) => {
-      emitToUser(pid.toString(), "memberLeftGroup", {
-        conversationId: conversationId,
-        userId: uid,
-      });
-    });
+  const full = await buildFullConversation(conversationId);
 
+conversation.participants.forEach((pid) => {
+  emitToUser(pid.toString(), "conversationUpdated", full);
+});
+
+emitToUser(uid, "leftGroup", {
+  conversationId: String(conversationId),
+});
     return convObj;
   } catch (error) {
     console.error("Leave Group Error:", error);
     throw error;
   }
 };
-
-
 
 // -----------------------------
 // DELETE MESSAGE (for everyone)
@@ -662,15 +693,15 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
         conversation.lastMessage = undefined;
       }
       await conversation.save();
-const preview = buildConversationPreview(conversation);
-conversation.participants.forEach((uid) => {
-  emitToUser(uid.toString(), "conversationUpdated", preview);
-});
+      const preview = buildConversationPreview(conversation);
+      conversation.participants.forEach((uid) => {
+        emitToUser(uid.toString(), "conversationUpdated", preview);
+      });
       // notify all participants in this conversation room
-     emitToRoom(conversationId, "messageDeleted", {
-  conversationId: String(conversationId),
-  messageId: String(deletedMessageId),
-});
+      emitToRoom(conversationId, "messageDeleted", {
+        conversationId: String(conversationId),
+        messageId: String(deletedMessageId),
+      });
     }
 
     return {
@@ -735,8 +766,8 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
       await Conversation.findByIdAndDelete(conversationId);
 
       emitToRoom(conversationId, "conversationPermanentlyDeleted", {
-  conversationId: String(conversationId),
-});
+        conversationId: String(conversationId),
+      });
 
       return {
         permanentlyDeleted: true,
@@ -759,20 +790,21 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
 // -----------------------------
 const updateMessage = async ({ messageId, newText, currentUserId }) => {
   try {
-    const message = await Message.findById(messageId)
-  .populate("sender", "name username profilePic");
+    const message = await Message.findById(messageId).populate(
+      "sender",
+      "name username profilePic"
+    );
 
     if (!message) throw new Error("Message not found.");
 
-   const senderId =
-  typeof message.sender === "object"
-    ? String(message.sender._id)
-    : String(message.sender);
+    const senderId =
+      typeof message.sender === "object"
+        ? String(message.sender._id)
+        : String(message.sender);
 
-if (senderId !== String(currentUserId)) {
-  throw new Error("You are not authorized to update this message.");
-}
-
+    if (senderId !== String(currentUserId)) {
+      throw new Error("You are not authorized to update this message.");
+    }
 
     const text = (newText ?? "").toString();
 
@@ -806,13 +838,12 @@ if (senderId !== String(currentUserId)) {
     }
 
     // send socket event for that conversation room
-   emitToRoom(conversationId, "messageUpdated", {
-  conversationId: String(conversationId),
-  messageId: String(messageId),
-  newText: message.text,
-  sender: message.sender,
-});
-
+    emitToRoom(conversationId, "messageUpdated", {
+      conversationId: String(conversationId),
+      messageId: String(messageId),
+      newText: message.text,
+      sender: message.sender,
+    });
 
     return message;
   } catch (error) {
@@ -826,8 +857,10 @@ if (senderId !== String(currentUserId)) {
 // -----------------------------
 const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
   try {
-    const originalMessage = await Message.findById(messageId)
-  .populate("sender", "name username");
+    const originalMessage = await Message.findById(messageId).populate(
+      "sender",
+      "name username"
+    );
 
     if (!originalMessage) throw new Error("Original message not found");
 
@@ -838,7 +871,7 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
       const targetId = String(rid);
 
       // =========================
-      // CHECK GROUP 
+      // CHECK GROUP
       // =========================
       const group = await Conversation.findById(targetId);
 
@@ -853,36 +886,36 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
           emitToUser(senderId, "conversationRestored", group.toObject());
         }
 
-      const newMsg = await Message.create({
-  sender: senderId,
-  conversationId: group._id,
-  text: originalMessage.text,
-  attachments: originalMessage.attachments || [],
+        const newMsg = await Message.create({
+          sender: senderId,
+          conversationId: group._id,
+          text: originalMessage.text,
+          attachments: originalMessage.attachments || [],
 
-  isForwarded: true,
-  forwardedFrom: {
-    user: originalMessage.sender?._id,
-    name: originalMessage.sender?.name,
-    username: originalMessage.sender?.username,
-    fromGroup: true,
-  },
+          isForwarded: true,
+          forwardedFrom: {
+            user: originalMessage.sender?._id,
+            name: originalMessage.sender?.name,
+            username: originalMessage.sender?.username,
+            fromGroup: true,
+          },
 
-  messageType: originalMessage.messageType,
-  callInfo: originalMessage.callInfo,
-  replyTo: originalMessage.replyTo || null,
-  seenBy: [senderId],
-});
+          messageType: originalMessage.messageType,
+          callInfo: originalMessage.callInfo,
+          replyTo: originalMessage.replyTo || null,
+          seenBy: [senderId],
+        });
 
-await newMsg.populate([
-  { path: "sender", select: "name username profilePic" },
-  {
-    path: "replyTo",
-    populate: {
-      path: "sender",
-      select: "name username profilePic",
-    },
-  },
-]);
+        await newMsg.populate([
+          { path: "sender", select: "name username profilePic" },
+          {
+            path: "replyTo",
+            populate: {
+              path: "sender",
+              select: "name username profilePic",
+            },
+          },
+        ]);
 
         group.lastMessage = {
           _id: newMsg._id,
@@ -939,40 +972,44 @@ await newMsg.populate([
           (id) => id.toString() !== recipientId
         );
         await conversation.save();
-        emitToUser(recipientId, "conversationRestored", conversation.toObject());
+        emitToUser(
+          recipientId,
+          "conversationRestored",
+          conversation.toObject()
+        );
       }
 
-    const newMsg = await Message.create({
-  sender: senderId,
-  receiver: recipientId,
-  conversationId: conversation._id,
-  text: originalMessage.text,
-  attachments: originalMessage.attachments || [],
+      const newMsg = await Message.create({
+        sender: senderId,
+        receiver: recipientId,
+        conversationId: conversation._id,
+        text: originalMessage.text,
+        attachments: originalMessage.attachments || [],
 
-  isForwarded: true,
-  forwardedFrom: {
-    user: originalMessage.sender?._id,
-    name: originalMessage.sender?.name,
-    username: originalMessage.sender?.username,
-    fromGroup: false, 
-  },
+        isForwarded: true,
+        forwardedFrom: {
+          user: originalMessage.sender?._id,
+          name: originalMessage.sender?.name,
+          username: originalMessage.sender?.username,
+          fromGroup: false,
+        },
 
-  messageType: originalMessage.messageType,
-  callInfo: originalMessage.callInfo,
-  replyTo: originalMessage.replyTo || null,
-  seenBy: [senderId],
-});
+        messageType: originalMessage.messageType,
+        callInfo: originalMessage.callInfo,
+        replyTo: originalMessage.replyTo || null,
+        seenBy: [senderId],
+      });
 
-await newMsg.populate([
-  { path: "sender", select: "name username profilePic" },
-  {
-    path: "replyTo",
-    populate: {
-      path: "sender",
-      select: "name username profilePic",
-    },
-  },
-]);
+      await newMsg.populate([
+        { path: "sender", select: "name username profilePic" },
+        {
+          path: "replyTo",
+          populate: {
+            path: "sender",
+            select: "name username profilePic",
+          },
+        },
+      ]);
 
       conversation.lastMessage = {
         _id: newMsg._id,
@@ -1017,9 +1054,6 @@ await newMsg.populate([
     throw err;
   }
 };
-
-
-
 
 // -----------------------------
 // DELETE MESSAGE FOR ME
@@ -1096,11 +1130,10 @@ const updateMessagesSeenStatus = async ({ conversationId, userId }) => {
         { new: true }
       );
     }
-emitToRoom(cid, "messagesSeen", {
-  conversationId: cid,
-  userId: uid,
-});
-
+    emitToRoom(cid, "messagesSeen", {
+      conversationId: cid,
+      userId: uid,
+    });
 
     return { ok: true };
   } catch (error) {
@@ -1120,9 +1153,7 @@ const reactToMessage = async ({ messageId, userId, emoji }) => {
   const uid = String(userId);
   let reactions = message.reactions || [];
 
-  const index = reactions.findIndex(
-    (r) => r.user.toString() === uid
-  );
+  const index = reactions.findIndex((r) => r.user.toString() === uid);
 
   if (!emoji || !emoji.trim()) {
     if (index !== -1) reactions.splice(index, 1);
@@ -1147,8 +1178,6 @@ const reactToMessage = async ({ messageId, userId, emoji }) => {
 
   return message;
 };
-
-
 
 // -----------------------------
 // PIN / UNPIN MESSAGES
@@ -1193,7 +1222,7 @@ const unpinMessage = async ({ conversationId, messageId }) => {
         (p) => p.messageId.toString() !== String(messageId)
       ) || [];
     await conv.save();
-emitToRoom(conversationId, "messageUnpinned", {
+    emitToRoom(conversationId, "messageUnpinned", {
       conversationId: String(conversationId),
       messageId: String(messageId),
     });

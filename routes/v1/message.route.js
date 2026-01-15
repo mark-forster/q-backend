@@ -50,7 +50,7 @@ router.post("/group/create", isAuth, messageController.createGroupChat);
 router.put("/group/rename", isAuth, messageController.renameGroup);
 router.put("/group/add", isAuth, messageController.addToGroup);
 router.put("/group/remove", isAuth, messageController.removeFromGroup);
-
+router.put("/group/leave", isAuth, messageController.leaveGroup);
 // Update message 
 router.put("/update/:messageId", isAuth, messageController.updateMessage);
 
