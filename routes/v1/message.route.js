@@ -71,6 +71,14 @@ router.put(
   messageController.updateMessagesSeenStatus
 );
 
+router.get(
+  "/group-read-state/:conversationId",
+  isAuth,
+  messageController.getGroupReadState
+);
+
+
+
 // Conversation delete route
 router.delete(
   "/conversation/:conversationId",

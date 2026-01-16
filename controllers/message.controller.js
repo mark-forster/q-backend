@@ -6,6 +6,7 @@ const Conversation = require("../models/conversation.model");
 const cloudinary = require("cloudinary").v2;
 const messageService = require("../services/message.service");
 const fs = require("fs");
+const GroupReadState = require("../models/groupReadState.model");
 
 const startConversation = catchAsync(async (req, res) => {
   const userId = req.user._id;
@@ -381,6 +382,20 @@ const updateMessagesSeenStatus = async (req, res) => {
     res.status(500).json({ error: "Internal Server Error" });
   }
 };
+
+const getGroupReadState = async (req, res) => {
+  const { conversationId } = req.params;
+
+  const rows = await GroupReadState.find({ conversationId })
+    .select("userId lastReadAt")
+    .lean();
+
+  res.json(rows);
+};
+
+
+
+//messager React
 const reactToMessage = catchAsync(async (req, res) => {
   const { messageId } = req.params;
   const { emoji } = req.body;
@@ -463,6 +478,7 @@ module.exports = {
   getSignedUrl,
   deleteMessageForMe,
   updateMessagesSeenStatus,
+  getGroupReadState,
   reactToMessage,
   removeReaction,
   pinMessage,

@@ -26,13 +26,15 @@ const lastCallInfoSchema = new mongoose.Schema(
 
 const lastMessageSchema = new mongoose.Schema(
   {
+    
+        // message id of last message
+        _id: { type: mongoose.Schema.Types.ObjectId, ref: "Message" },
     text: String,
     sender: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    seenBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
-
-    // message id of last message
-    _id: { type: mongoose.Schema.Types.ObjectId, ref: "Message" },
-
+      messageType: {
+      type: String,
+      enum: ["text", "call", "system"],
+    },
     callInfo: {
       type: lastCallInfoSchema,
       default: null,

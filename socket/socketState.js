@@ -17,6 +17,29 @@ function setUserSocket(userId, socketId) {
   userSocketMap.set(id, set);
   socketToUserId.set(socketId, id);
 }
+// conversationId => Set(userId)
+const conversationReaders = new Map();
+
+function addConversationReader(conversationId, userId) {
+  const cid = String(conversationId);
+  const uid = String(userId);
+  if (!conversationReaders.has(cid)) {
+    conversationReaders.set(cid, new Set());
+  }
+  conversationReaders.get(cid).add(uid);
+}
+
+function removeConversationReader(conversationId, userId) {
+  const cid = String(conversationId);
+  const uid = String(userId);
+  conversationReaders.get(cid)?.delete(uid);
+}
+
+function isUserReadingConversation(conversationId, userId) {
+  return conversationReaders
+    .get(String(conversationId))
+    ?.has(String(userId));
+}
 
 function removeUserSocket(socketId) {
   const uid = socketToUserId.get(socketId);
@@ -28,10 +51,20 @@ function removeUserSocket(socketId) {
   }
   socketToUserId.delete(socketId);
 }
+function removeUserFromAllConversationReaders(userId) {
+  const uid = String(userId);
+  for (const set of conversationReaders.values()) {
+    set.delete(uid);
+  }
+}
 
 module.exports = {
   getRecipientSocketIds,
   getOnlineUserIds,
   setUserSocket,
   removeUserSocket,
+  addConversationReader,
+  removeConversationReader,
+  isUserReadingConversation,
+  removeUserFromAllConversationReaders
 };

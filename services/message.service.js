@@ -5,6 +5,8 @@ const { emitToUser, emitToRoom } = require("../socket/socketEmitter");
 const cloudinary = require("cloudinary").v2;
 const fs = require("fs");
 const { getOnlineUserIds } = require("../socket/socketState");
+const { isUserReadingConversation } = require("../socket/socketState");
+const GroupReadState = require("../models/groupReadState.model");
 
 // Helper Fuctions
 
@@ -162,6 +164,39 @@ function resolveLastMessageText(
   return "File";
 }
 
+async function updateGroupReadPointer({ conversationId, userId }) {
+  const conv = await Conversation.findById(conversationId).select("isGroup");
+  if (!conv || !conv.isGroup) return null;
+
+  // find latest message not deleted
+  const lastMsg = await Message.findOne({
+    conversationId,
+    deletedForAll: { $ne: true },
+    deletedFor: { $ne: userId },
+  })
+    .sort({ createdAt: -1 })
+    .select("_id createdAt")
+    .lean();
+
+  if (!lastMsg) return null;
+
+  await GroupReadState.updateOne(
+    { conversationId, userId },
+    {
+      $set: {
+        lastReadMessageId: lastMsg._id,
+        lastReadAt: new Date(),
+      },
+    },
+    { upsert: true }
+  );
+
+  return { lastReadMessageId: lastMsg._id };
+}
+
+
+
+
 // ======================================================
 //        SEND MESSAGE
 // ======================================================
@@ -248,15 +283,30 @@ const sendMessage = async ({
     // --------------------------------------------------
     //  Create message
     // --------------------------------------------------
+
+
+const receiverIsReading =
+  !isGroup &&
+  receiver &&
+  isUserReadingConversation(conversation._id, receiver);
+
+let status = isGroup ? undefined : "sent";
+let readAt = null;
+
+if (receiverIsReading) {
+  status = "read";
+  readAt = new Date();
+}
     const newMessage = await Message.create({
       conversationId: conversation._id,
       sender,
       receiver,
       text: message || "",
       attachments,
-      seenBy: [sender],
       messageType: "text",
       replyTo: replyTo || null,
+      status:status,
+      readAt
     });
     await newMessage.populate([
       { path: "sender", select: "name username profilePic" },
@@ -278,8 +328,8 @@ const sendMessage = async ({
       _id: newMessage._id,
       text: lastText,
       sender,
-      seenBy: [sender],
-      updatedAt: new Date(),
+updatedAt: newMessage.createdAt,
+        status: isGroup ? undefined : status,
       callInfo: null,
     };
 
@@ -301,6 +351,13 @@ conversation.participants.forEach((uid) => {
     // --------------------------------------------------
     // Emit newMessage
     // --------------------------------------------------
+    if (!isGroup && receiverIsReading) {
+  emitToRoom(conversation._id.toString(), "messagesSeen", {
+    conversationId: conversation._id,
+    userId: receiver,
+  });
+}
+
     if (isGroup) {
       conversation.participants.forEach((uid) => {
         const id = uid._id?.toString?.() || uid.toString();
@@ -346,10 +403,28 @@ const getMessages = async ({
     const numericSkip = Number(skip) || 0;
     const numericLimit = Number(limit) || 50;
     const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
+      const conv = await Conversation.findById(conversationId).select("isGroup");
+   if (!conv?.isGroup) {
+    await updateMessagesSeenStatus({ conversationId, userId });
+  }
+ if (conv?.isGroup) {
+    const lastMsg = await updateGroupReadPointer({
+      conversationId,
+      userId,
+    });
 
+    if (lastMsg) {
+      emitToRoom(String(conversationId), "groupReadUpdated", {
+        conversationId: String(conversationId),
+        userId: String(userId),
+        lastReadAt: new Date(),
+      });
+    }
+  }
     const messages = await Message.find({
       conversationId,
-      deletedBy: { $ne: userId },
+  deletedFor: { $ne: userId },  deletedForAll: { $ne: true },
+
     })
       .sort({ createdAt: -1 })
       .skip(numericSkip)
@@ -413,7 +488,8 @@ const searchMessages = async ({ conversationId, userId, text }) => {
 
     const messages = await Message.find({
       conversationId,
-      deletedBy: { $ne: userId },
+       deletedForAll: { $ne: true },
+  deletedFor: { $ne: userId },
       text: { $regex: text, $options: "i" },
     })
       .sort({ createdAt: -1 })
@@ -441,11 +517,14 @@ const getConversations = async (userId) => {
 
     const withUnread = await Promise.all(
       conversations.map(async (conv) => {
-        const unreadCount = await Message.countDocuments({
-          conversationId: conv._id,
-          deletedBy: { $ne: userId },
-          seenBy: { $ne: userId },
-        });
+       const unreadCount = await Message.countDocuments({
+  conversationId: conv._id,
+  deletedForAll: { $ne: true },
+  deletedFor: { $ne: userId },
+  sender: { $ne: userId },
+  status: { $ne: "read" }, 
+});
+
 
         const doc = conv.toObject();
 
@@ -663,14 +742,16 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
     const conversationId = message.conversationId;
     const deletedMessageId = message._id;
 
-    await Message.findByIdAndDelete(messageId);
-
+await Message.findByIdAndUpdate(messageId, {
+  deletedForAll: true,
+});
     const conversation = await Conversation.findById(conversationId);
     if (conversation) {
       // re-compute lastMessage
       const lastMessage = await Message.findOne({
-        conversationId,
-        deletedBy: { $ne: currentUserId },
+       conversationId,
+  deletedForAll: { $ne: true },
+  deletedFor: { $ne: currentUserId },
       })
         .sort({ createdAt: -1 })
         .lean();
@@ -685,7 +766,7 @@ const deleteMessage = async ({ messageId, currentUserId }) => {
             lastMessage.callInfo
           ),
           sender: lastMessage.sender,
-          seenBy: lastMessage.seenBy,
+              status: conversation.isGroup ? undefined : lastMessage.status,
           updatedAt: lastMessage.updatedAt,
           callInfo: lastMessage.callInfo || null,
         };
@@ -730,7 +811,7 @@ const deleteConversation = async ({ conversationId, currentUserId }) => {
 
     await Message.updateMany(
       { conversationId },
-      { $addToSet: { deletedBy: currentUserId } }
+      { $addToSet: { deletedFor: currentUserId } }
     );
 
     const totalParticipants = conversation.participants.length;
@@ -829,7 +910,6 @@ const updateMessage = async ({ messageId, newText, currentUserId }) => {
               latest.callInfo
             ),
             sender: latest.sender,
-            seenBy: latest.seenBy,
             updatedAt: new Date(),
             callInfo: latest.callInfo || null,
           },
@@ -903,7 +983,8 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
           messageType: originalMessage.messageType,
           callInfo: originalMessage.callInfo,
           replyTo: originalMessage.replyTo || null,
-          seenBy: [senderId],
+         status:  undefined 
+
         });
 
         await newMsg.populate([
@@ -926,7 +1007,6 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
             newMsg.callInfo
           ),
           sender: senderId,
-          seenBy: [senderId],
           updatedAt: new Date(),
           callInfo: newMsg.callInfo || null,
         };
@@ -997,7 +1077,7 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
         messageType: originalMessage.messageType,
         callInfo: originalMessage.callInfo,
         replyTo: originalMessage.replyTo || null,
-        seenBy: [senderId],
+        status: "sent",
       });
 
       await newMsg.populate([
@@ -1020,7 +1100,7 @@ const forwardMessage = async ({ currentUserId, messageId, recipientIds }) => {
           newMsg.callInfo
         ),
         sender: senderId,
-        seenBy: [senderId],
+          status: conversation.isGroup ? undefined : newMsg.status,
         updatedAt: new Date(),
         callInfo: newMsg.callInfo || null,
       };
@@ -1062,7 +1142,7 @@ const deleteMessageForMe = async ({ messageId, currentUserId }) => {
   try {
     const message = await Message.findByIdAndUpdate(
       messageId,
-      { $addToSet: { deletedBy: currentUserId } },
+{ $addToSet: { deletedFor: currentUserId } },
       { new: true }
     );
     if (!message) throw new Error("Message not found or update failed.");
@@ -1073,7 +1153,7 @@ const deleteMessageForMe = async ({ messageId, currentUserId }) => {
     }
 
     const totalParticipants = conversation.participants.length;
-    const deletedByCount = message.deletedBy.length;
+    const deletedByCount = message.deletedFor.length;
 
     if (totalParticipants > 0 && totalParticipants === deletedByCount) {
       await Message.findByIdAndDelete(messageId);
@@ -1114,33 +1194,53 @@ const updateMessagesSeenStatus = async ({ conversationId, userId }) => {
     const cid = String(conversationId);
     const uid = String(userId);
 
+    const conv = await Conversation.findById(cid).select("isGroup");
+    if (!conv || conv.isGroup) return;
+
+    // mark unread messages as read (only sender ≠ me)
     await Message.updateMany(
-      { conversationId: cid, seenBy: { $ne: uid } },
-      { $addToSet: { seenBy: uid } }
+      {
+        conversationId: cid,
+        sender: { $ne: uid },
+        status: { $ne: "read" },
+      },
+      {
+        status: "read",
+        readAt: new Date(),
+      }
     );
 
-    const conv = await Conversation.findById(cid).select("lastMessage");
-    if (conv && conv.lastMessage) {
-      await Conversation.findByIdAndUpdate(
-        cid,
-        {
-          $addToSet: { "lastMessage.seenBy": uid },
-          $set: { "lastMessage.updatedAt": new Date() },
+    //  find LAST MESSAGE SENT BY OTHER USER
+    const lastFromOther = await Message.findOne({
+      conversationId: cid,
+      sender: { $ne: uid },
+      deletedForAll: { $ne: true },
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    //  update conversation.lastMessage ONLY if needed
+    if (lastFromOther) {
+      await Conversation.findByIdAndUpdate(cid, {
+        $set: {
+          "lastMessage.status": "read",
+          "lastMessage.readAt": lastFromOther.readAt || new Date(),
         },
-        { new: true }
-      );
+      });
     }
+
     emitToRoom(cid, "messagesSeen", {
       conversationId: cid,
       userId: uid,
     });
 
     return { ok: true };
-  } catch (error) {
-    console.error("Update Messages Seen Status Error:", error);
-    throw error;
+  } catch (err) {
+    console.error("Update Messages Seen Status Error:", err);
+    throw err;
   }
 };
+
 
 // -----------------------------
 // MESSAGE REACTIONS

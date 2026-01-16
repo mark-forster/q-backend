@@ -4,12 +4,17 @@ const Conversation = require("../models/conversation.model");
 const CallLog = require("../models/callLog.model");
 const { createCallMessage } = require("../helpers/createCallMessage");
 const { reactToMessage } = require("../services/message.service");
+const GroupReadState = require("../models/groupReadState.model");
 
 const {
   getRecipientSocketIds,
   getOnlineUserIds,
   setUserSocket,
   removeUserSocket,
+  addConversationReader,
+  removeConversationReader, 
+  removeUserFromAllConversationReaders,
+
 } = require("./socketState");
 
 const JWT_SECRET = config.jwt?.secret || process.env.JWT_SECRET;
@@ -142,6 +147,43 @@ io.on("connection", async (socket) => {
   } catch {}
 
   io.emit("getOnlineUsers", getOnlineUserIds());
+
+socket.on("joinConversation", ({ conversationId }) => {
+  if (!conversationId) return;
+  socket.join(String(conversationId));
+  addConversationReader(conversationId, uid);
+});
+socket.on("leaveConversation", ({ conversationId }) => {
+  if (!conversationId) return;
+  socket.leave(String(conversationId));
+  removeConversationReader(conversationId, uid);
+});
+
+socket.on("groupRead", async ({ conversationId, userId }) => {
+  try {
+    if (!conversationId || !userId) return;
+
+    // update read pointer
+    const state = await GroupReadState.findOneAndUpdate(
+      { conversationId, userId },
+      {
+        $set: {
+          lastReadAt: new Date(),
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    io.to(String(conversationId)).emit("groupReadUpdated", {
+      conversationId: String(conversationId),
+      userId: String(userId),
+      lastReadAt: state.lastReadAt,
+    });
+  } catch (err) {
+    console.error("groupRead socket error:", err.message);
+  }
+});
+
 // ================================
 // MESSAGE REACTION SOCKET LISTENER
 // ================================
@@ -640,6 +682,7 @@ socket.on("reactMessage", async ({ messageId, userId, emoji }) => {
 
   /* ------------ DISCONNECT ------------ */
   socket.on("disconnect", () => {
+    removeUserFromAllConversationReaders(uid);
     removeUserSocket(socket.id);
     io.emit("getOnlineUsers", getOnlineUserIds());
   });

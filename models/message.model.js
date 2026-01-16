@@ -115,32 +115,41 @@ const messageSchema = new mongoose.Schema(
       default: [],
     },
 
-    deletedBy: [
+    deletedForAll: {
+      type: Boolean,
+      default: false,
+    },
+
+    deletedFor: [
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: "User",
       },
     ],
 
-    seenBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
-
-    isRead: { type: Boolean, default: false },
+    status: {
+      type: String,
+      enum: ["sent", "delivered", "read"],
+      default: "sent",
+    },
+    deliveredAt: Date,
+    readAt: Date,
 
     isForwarded: { type: Boolean, default: false },
     forwardedFrom: {
-  kind: {
-    type: String,
-    enum: ["user"],
-    default: "user",
-  },
-  user: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "User",
-    default: null,
-  },
-  name: String,
-  username: String,
-},
+      kind: {
+        type: String,
+        enum: ["user"],
+        default: "user",
+      },
+      user: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      name: String,
+      username: String,
+    },
   },
   { timestamps: true }
 );
